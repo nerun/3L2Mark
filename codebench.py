@@ -58,7 +58,7 @@ import time
 import urllib.parse
 from fractions import Fraction
 
-VERSION = "1.0 Beta 1"
+VERSION = "1.0 Beta 3"
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5017,7 +5017,7 @@ def write_report(path, meta, results, tasks):
     add("| Time-limit scale | %.2f |" % meta["scale"])
     add("| Machine | %s |" % meta["machine"])
     add("| Toolchains | %s |" % "; ".join("%s: %s" % (LANG_LABEL[k], v) for k, v in meta["toolchains"].items()))
-    add("| Benchmark version | %s |" % VERSION)
+    add("| Benchmark version | %s |" % meta.get("version", "unknown"))
     add("")
 
     add("## Score by category")
@@ -5131,8 +5131,8 @@ def compare(out_dir, show_all=False):
              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), len(rows),
              "" if show_all else " (latest run of each model)"), "",
          "| # | Model | Score | Write | Bugs | Optimize | SQL | " + " | ".join(langs) +
-         " | Solved | Builds | tok/s | Gen time | Runs | Date |",
-         "|---:|---|---:|---:|---:|---:|---:|" + "---:|" * len(langs) + "---:|---:|---:|---:|---:|---|"]
+         " | Solved | Builds | tok/s | Gen time | Runs | Date | Version |",
+         "|---:|---|---:|---:|---:|---:|---:|" + "---:|" * len(langs) + "---:|---:|---:|---:|---:|---|---|"]
     for i, (meta, agg) in enumerate(rows, 1):
         cat = {k: None for k in cats}
         for label, sc, _ in agg["by_category"]:
@@ -5146,12 +5146,18 @@ def compare(out_dir, show_all=False):
         flags = ""
         if meta.get("partial") or meta.get("skipped_langs"):
             flags = " (incomplete)"
-        L.append("| %d | %s%s | %s | %s | %s | %d/%d | %.0f%% | %.1f | %s | %d | %s |" % (
+        L.append("| %d | %s%s | %s | %s | %s | %d/%d | %.0f%% | %.1f | %s | %d | %s | %s |" % (
             i, meta["name"], flags, score,
             " | ".join("-" if cat[k] is None else "%.1f" % cat[k] for k in cats),
             " | ".join("-" if l not in lang else "%.1f" % lang[l] for l in langs),
             agg["perfect"], len(agg["tasks"]), agg["compile_rate"], agg["tps"],
-            fmt_secs(agg["gen_seconds"]), meta["runs"], meta["date"][:10]))
+            fmt_secs(agg["gen_seconds"]), meta["runs"], meta["date"][:10],
+            meta.get("version", "unknown")))
+    versions = sorted(set(meta.get("version", "unknown") for meta, _ in rows))
+    if len(versions) > 1:
+        L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
+                  "or limits may differ between versions, so the scores are not directly comparable.**"
+                  % ", ".join(versions)]
     L += ["", "## Score per task", "",
           "| Task | " + " | ".join(meta["name"] for meta, _ in rows) + " |",
           "|---|" + "---:|" * len(rows)]
@@ -5184,7 +5190,7 @@ def parse_args(argv):
     p.add_argument("--name", help="model name used in reports and folder names (default: taken from the server)")
     p.add_argument("--runs", type=int, default=1, help="answers requested per task; the score is the mean (default: 1)")
     p.add_argument("--seed", type=int, default=1234, help="base seed sent to the server (run k uses seed+k)")
-    p.add_argument("--max-tokens", type=int, default=16384, help="token cap per answer, reasoning included (default: %(default)s)")
+    p.add_argument("--max-tokens", type=int, default=24576, help="token cap per answer, reasoning included (default: %(default)s)")
     p.add_argument("--task-timeout", type=int, default=1800, help="wall-clock cap per answer in seconds (default: %(default)s)")
     p.add_argument("--temperature", type=float, help="override the server's temperature (default: do not send)")
     p.add_argument("--top-p", type=float, help="override the server's top_p (default: do not send)")
@@ -5284,6 +5290,12 @@ def main(argv=None):
         except Exception as e:
             print("Cannot resume from %s: %s" % (run_dir, e))
             return 2
+        old_version = old["meta"].get("version", "unknown")
+        if old_version != VERSION:
+            print("Cannot resume from %s: it was created by codebench %s and this is %s; "
+                  "scores from different versions must not be mixed in one run."
+                  % (run_dir, old_version, VERSION))
+            return 2
     else:
         date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         run_dir = os.path.join(args.out, slugify(name),
@@ -5313,9 +5325,10 @@ def main(argv=None):
     print("\nModel: %s   (server: %s%s)" % (name, server.url,
                                             ", ctx %s" % info["n_ctx"] if info.get("n_ctx") else ""))
     print("Tasks: %d x %d run(s). Results in %s\n" % (len(tasks), args.runs, run_dir))
-    if info.get("n_ctx") and int(info["n_ctx"]) < 12000:
-        print("WARNING: context size %s is small; long answers will be cut off (16384 or more is "
-              "recommended).\n" % info["n_ctx"])
+    ctx_needed = args.max_tokens + 4096  # answer cap plus room for the longest prompt
+    if info.get("n_ctx") and int(info["n_ctx"]) < ctx_needed:
+        print("WARNING: context size %s is small; long answers will be cut off (%d or more is "
+              "recommended for --max-tokens %d).\n" % (info["n_ctx"], ctx_needed, args.max_tokens))
 
     consecutive_errors = 0
     t_start = time.monotonic()
