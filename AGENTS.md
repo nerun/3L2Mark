@@ -88,6 +88,9 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 - **Runtime-dependent behaviour.** Avoid bugs that differ between runtimes (`Dictionary.Remove` during enumeration throws on Mono but not on .NET Core 3+; culture-aware string comparison; PHP 7 vs 8 loose comparison of non-numeric strings).
 - **Programs run with `LC_ALL=C.UTF-8`** so that number formatting does not depend on the user's locale.
 - **SQLite and correlated subqueries.** The slow query in `sql_opt_events` is only slow enough at the current tier sizes; re-measure the unchanged query if you touch them.
+- **The JVM logs warnings to stdout.** In containers (Google Colab) it prints `[0.001s][warning][os,container] ...` before the program's output, failing every Java test. Java runs with `JVM_QUIET` (`-Xlog` sent to stderr); `is_jvm_noise()` filters the same lines from `javac` output.
+- **ASan start-up failures.** On some kernels and containers a sanitizer build exits with status 1 at random, before `main`, because of address-space randomization. Sanitizer runs disable ASLR (`personality`, best effort) and a crash without a sanitizer report is retried up to `SAN_RETRIES` times. A real crash reproduces, so this cannot turn a failure into a pass by luck alone.
+- **Reasoning loops.** Small models often get stuck repeating one block of reasoning until `max_tokens`. Raising the cap does not help; `LoopWatch` stops the answer early (finish reason `loop`, counted as cut off) once the tail of the stream is thousands of characters of exact repetition. Keep the rule strict: a false positive would change a score. `--no-loop-detection` turns it off.
 - **Row comparison** normalizes integral floats to `int` (`TOTAL()` vs `SUM()`), so do not write tests that depend on that difference.
 
 ## Adding or changing a task
