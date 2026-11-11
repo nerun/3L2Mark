@@ -40,6 +40,7 @@ your user privileges).
 """
 
 import argparse
+import ctypes
 import datetime
 import http.client
 import json
@@ -58,7 +59,7 @@ import time
 import urllib.parse
 from fractions import Fraction
 
-VERSION = "1.0 Beta 3"
+VERSION = "1.0 Beta 5"
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -135,11 +136,21 @@ def shorten(text, limit=600):
     return text[:limit] + " ...[truncated]"
 
 
+def is_jvm_noise(line):
+    """JVM chatter that is not part of a tool's real output: the JAVA_TOOL_OPTIONS notice and
+    unified-logging lines such as '[0.001s][warning][os,container] ...' (seen in containers)."""
+    return line.startswith("Picked up ") or re.match(r"\[\d+[.,]\d+s\]\[", line) is not None
+
+
+# The JVM writes its own warnings to stdout by default, which would corrupt a program's answer.
+JVM_QUIET = ["-Xlog:disable", "-Xlog:all=warning:stderr"]
+
+
 def first_line(cmd):
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         out = p.stdout.decode("utf-8", "replace").strip().splitlines()
-        out = [ln for ln in out if not ln.startswith("Picked up ")]
+        out = [ln for ln in out if not is_jvm_noise(ln)]
         return out[0].strip() if out else ""
     except Exception:
         return ""
@@ -243,9 +254,10 @@ def detect_toolchains(csharp_pref="auto"):
                 p = subprocess.run([tc["c"]["exe"], "-fsanitize=address,undefined", src, "-o",
                                     os.path.join(d, "t")], stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=60)
-                ok = p.returncode == 0 and subprocess.run(
-                    [os.path.join(d, "t")], env=child_env(), timeout=30,
+                ok = p.returncode == 0 and any(subprocess.run(
+                    [os.path.join(d, "t")], env=child_env(), timeout=30, preexec_fn=disable_aslr,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+                    for _ in range(SAN_RETRIES))
             except Exception:
                 ok = False
         tc["c"]["san"] = ok
@@ -369,16 +381,39 @@ def build_program(lang, code, workdir, tc):
             f.write(code)
         rc, log = _run_tool(["javac", "-nowarn", "-encoding", "UTF-8", "-d", ".",
                              main_class + ".java"], workdir)
-        log = "\n".join(ln for ln in log.splitlines() if not ln.startswith("Picked up "))
-        return Built(rc == 0, log, ["java", "-Xss256m", "-Xmx1500m", "-XX:+UseSerialGC",
-                                    "-cp", ".", main_class])
+        log = "\n".join(ln for ln in log.splitlines() if not is_jvm_noise(ln))
+        return Built(rc == 0, log, ["java"] + JVM_QUIET + ["-Xss256m", "-Xmx1500m", "-XX:+UseSerialGC",
+                                                           "-cp", ".", main_class])
     raise ValueError(lang)
 
 
 OUTPUT_CAP = 96 << 20
 
+# Sanitizer builds can fail at start-up, at random, when address-space randomization puts a
+# mapping where ASan wants its shadow memory (kernels with high mmap entropy, some containers).
+# Two defences: start them with randomization off, and retry a crash that has no sanitizer report.
+ADDR_NO_RANDOMIZE = 0x0040000
+SAN_RETRIES = 5
+try:
+    _LIBC = ctypes.CDLL(None, use_errno=True)
+except Exception:
+    _LIBC = None
 
-def run_case(cmd, workdir, data, limit, mem_bytes=None, fsize_limit=True):
+
+def disable_aslr():
+    """For preexec_fn: best effort, silently does nothing where the call is not permitted."""
+    try:
+        if _LIBC is not None:
+            _LIBC.personality(ADDR_NO_RANDOMIZE)
+    except Exception:
+        pass
+
+
+def has_sanitizer_report(err):
+    return re.search(r"ERROR: (Address|Leak)Sanitizer|runtime error:|SUMMARY: \w+Sanitizer", err) is not None
+
+
+def run_case(cmd, workdir, data, limit, mem_bytes=None, fsize_limit=True, no_aslr=False):
     """Run one test case. Returns (verdict, stdout_text, stderr_tail, seconds).
 
     verdict is one of: ok, timeout, crash.
@@ -390,6 +425,8 @@ def run_case(cmd, workdir, data, limit, mem_bytes=None, fsize_limit=True):
         f.write(data)
 
     def limits():
+        if no_aslr:
+            disable_aslr()
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         if fsize_limit:
             resource.setrlimit(resource.RLIMIT_FSIZE, (OUTPUT_CAP, OUTPUT_CAP))
@@ -438,6 +475,47 @@ def run_case(cmd, workdir, data, limit, mem_bytes=None, fsize_limit=True):
 # --------------------------------------------------------------------------
 # llama.cpp client (OpenAI-compatible chat completions, streamed)
 # --------------------------------------------------------------------------
+
+CUT_OFF = ("length", "wall-limit", "loop")  # finish reasons of an answer that was not completed
+
+LOOP_MIN_SPAN = 4000     # characters that must be an exact repetition
+LOOP_MIN_REPS = 6        # ... and at least this many copies of the repeated block
+LOOP_MAX_PERIOD = 2000   # longest repeated block looked for, in characters
+LOOP_CHECK_EVERY = 1500  # characters received between two checks
+
+
+def find_loop(text):
+    """Return the period when the end of text is one block repeated verbatim, else 0.
+
+    The rule is deliberately strict (thousands of characters of exact repetition), so that it
+    only fires on a model stuck in a loop and never on ordinary repetitive code or prose.
+    """
+    n = len(text)
+    for p in range(8, LOOP_MAX_PERIOD + 1):
+        span = max(LOOP_MIN_SPAN, p * LOOP_MIN_REPS)
+        if n < span + p:
+            break
+        if text[n - span:] == text[n - span - p:n - p]:
+            return p
+    return 0
+
+
+class LoopWatch:
+    """Incremental find_loop() over a stream; keeps only the tail it needs."""
+    KEEP = LOOP_MAX_PERIOD * (LOOP_MIN_REPS + 1)
+
+    def __init__(self):
+        self.tail = ""
+        self.pending = 0
+
+    def feed(self, piece):
+        self.tail = (self.tail + piece)[-self.KEEP:]
+        self.pending += len(piece)
+        if self.pending < LOOP_CHECK_EVERY:
+            return False
+        self.pending = 0
+        return find_loop(self.tail) > 0
+
 
 class Server:
     def __init__(self, url, api_key=None):
@@ -511,7 +589,7 @@ class Server:
         return info
 
     def chat(self, messages, max_tokens, seed, wall_limit, extra=None, idle_timeout=600,
-             progress=None):
+             progress=None, detect_loops=True):
         """Streamed chat completion. Never raises; errors are reported in the result."""
         body = {"messages": messages, "stream": True, "max_tokens": max_tokens, "seed": seed,
                 "stream_options": {"include_usage": True}}
@@ -540,6 +618,8 @@ class Server:
                 self._absorb_final(obj, res)
                 return res
             content, reasoning = [], []
+            tails = {"content": LoopWatch(), "reasoning": LoopWatch()}
+            looping = False
             while True:
                 raw = resp.readline()
                 if not raw:
@@ -562,10 +642,12 @@ class Server:
                     if delta.get("content"):
                         content.append(delta["content"])
                         res["chunks"] += 1
+                        looping = looping or (detect_loops and tails["content"].feed(delta["content"]))
                     r = delta.get("reasoning_content") or delta.get("reasoning")
                     if isinstance(r, str) and r:
                         reasoning.append(r)
                         res["chunks"] += 1
+                        looping = looping or (detect_loops and tails["reasoning"].feed(r))
                     if ch.get("finish_reason"):
                         res["finish"] = ch["finish_reason"]
                 self._absorb_usage(obj, res)
@@ -574,6 +656,9 @@ class Server:
                     progress(res["chunks"], elapsed)
                 if elapsed > wall_limit:
                     res["finish"] = "wall-limit"
+                    break
+                if looping and res["finish"] is None:
+                    res["finish"] = "loop"
                     break
             res["content"] = "".join(content)
             res["reasoning"] = "".join(reasoning)
@@ -4773,8 +4858,13 @@ def grade_program(t, code, tc, scale, workdir):
                                        "simple tests", x["weight"]))
                 continue
         mem = NATIVE_MEM if (lang in ("python", "php") or (lang in ("c", "cpp") and not use_san)) else None
-        verdict, out, err, secs = run_case(cmd, workdir, data, limit, mem,
-                                           fsize_limit=lang not in ("csharp", "java"))
+        for attempt in range(SAN_RETRIES if use_san else 1):
+            verdict, out, err, secs = run_case(cmd, workdir, data, limit, mem,
+                                               fsize_limit=lang not in ("csharp", "java"),
+                                               no_aslr=use_san)
+            # A real failure reproduces or carries a sanitizer report; a start-up failure does not.
+            if verdict != "crash" or has_sanitizer_report(err):
+                break
         if verdict == "timeout":
             res = R(x["name"], False, "time limit of %.1fs exceeded" % limit, x["weight"])
             if not x["timed"]:
@@ -4790,7 +4880,7 @@ def grade_program(t, code, tc, scale, workdir):
             else:
                 lines = [ln for ln in err.strip().splitlines() if ln.strip()]
                 if lines:
-                    reason += ": " + lines[-1]
+                    reason += ": " + " | ".join(lines[-2:])
             res = R(x["name"], False, shorten(reason, 240), x["weight"])
         else:
             got, want = norm_out(out), norm_out(x["expected"])
@@ -4960,7 +5050,7 @@ def aggregate(results, tasks):
         "gen_seconds": sum(r["gen"]["seconds"] for r in results),
         "tokens": sum((r["gen"]["completion_tokens"] or 0) for r in results),
         "tps": statistics.mean([r["gen"]["tps"] for r in results if r["gen"]["tps"]] or [0]),
-        "truncated": sum(1 for r in results if r["gen"]["finish"] in ("length", "wall-limit")),
+        "truncated": sum(1 for r in results if r["gen"]["finish"] in CUT_OFF),
         "gen_errors": sum(1 for r in results if r["gen"]["error"]),
     }
 
@@ -5052,7 +5142,7 @@ def write_report(path, meta, results, tasks):
     add("|---|---:|")
     add("| Tasks solved completely | %d of %d |" % (agg["perfect"], len(agg["tasks"])))
     add("| Answers that compile/parse at the first attempt | %.0f%% |" % agg["compile_rate"])
-    add("| Answers cut off (token or time limit) | %d |" % agg["truncated"])
+    add("| Answers cut off (token limit, time limit or loop) | %d |" % agg["truncated"])
     add("| Failed requests | %d |" % agg["gen_errors"])
     add("| Total generation time | %s |" % fmt_secs(agg["gen_seconds"]))
     add("| Total generated tokens | %d |" % agg["tokens"])
@@ -5071,7 +5161,7 @@ def write_report(path, meta, results, tasks):
         add("")
         if rec["gen"]["error"]:
             add("- Request error: %s" % rec["gen"]["error"])
-        if rec["gen"]["finish"] in ("length", "wall-limit"):
+        if rec["gen"]["finish"] in CUT_OFF:
             add("- The answer was cut off (%s)." % rec["gen"]["finish"])
         add("- Code taken from: %s" % rec["extraction"])
         if not rec["compiled"]:
@@ -5191,6 +5281,9 @@ def parse_args(argv):
     p.add_argument("--runs", type=int, default=1, help="answers requested per task; the score is the mean (default: 1)")
     p.add_argument("--seed", type=int, default=1234, help="base seed sent to the server (run k uses seed+k)")
     p.add_argument("--max-tokens", type=int, default=24576, help="token cap per answer, reasoning included (default: %(default)s)")
+    p.add_argument("--no-loop-detection", action="store_true",
+                   help="do not stop an answer that repeats the same text over and over "
+                        "(by default it is stopped early and reported with finish reason 'loop')")
     p.add_argument("--task-timeout", type=int, default=1800, help="wall-clock cap per answer in seconds (default: %(default)s)")
     p.add_argument("--temperature", type=float, help="override the server's temperature (default: do not send)")
     p.add_argument("--top-p", type=float, help="override the server's top_p (default: do not send)")
@@ -5345,7 +5438,7 @@ def main(argv=None):
                 status("%s generating... %d tokens, %s" % (label, chunks, fmt_secs(secs)))
 
             gen = server.chat(messages, args.max_tokens, args.seed + k, args.task_timeout, extra,
-                              progress=progress)
+                              progress=progress, detect_loops=not args.no_loop_detection)
             status("%s testing..." % label)
             stem = os.path.join(run_dir, "answers", "%s_run%d" % (t["id"], k))
             with open(stem + ".md", "w", encoding="utf-8") as f:
@@ -5369,7 +5462,7 @@ def main(argv=None):
             note = ""
             if gen["error"]:
                 note = "  REQUEST ERROR: %s" % shorten(gen["error"], 120)
-            elif gen["finish"] in ("length", "wall-limit"):
+            elif gen["finish"] in CUT_OFF:
                 note = "  (answer cut off: %s)" % gen["finish"]
             print("%s %5.1f%%  %2d/%-2d tests  %s  gen %s, %d tok, %.1f tok/s%s" % (
                 label, 100 * res["score"], res["passed"], res["total"],
