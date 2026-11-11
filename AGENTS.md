@@ -98,7 +98,7 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 4. Run `--selftest --only <id>`, check the original's score, and inspect per-test results for the `given` program to confirm each bug or tier behaves as designed.
 5. For timed tiers, measure the reference, a typical "good enough" solution, and the slow original with `--time-scale 5`.
 
-**Changing tasks, tests, prompts or weights changes what a score means.** Bump `VERSION` whenever you do; `--compare` does not yet refuse to mix versions (worth adding).
+**Changing tasks, tests, prompts or weights changes what a score means.** Bump `VERSION` whenever you do. The version is stored in `results.json` (`meta.version`) and shown in `report.md`; `--compare` lists it per model and warns when versions differ, and `--resume` refuses a run created by another version.
 
 ## Results format
 
