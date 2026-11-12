@@ -14,3 +14,13 @@ This benchmark was created because I wanted to evaluate which variant of the Qwe
 - Triumvirate
 
 For that, I asked Claude Fable 5.2 to create it... Yes, I know. But what could be better than an AI to test its little brothers?
+
+## Install dependencies
+
+Toolchains on Debian:
+
+```bash
+sudo apt update && sudo apt install -y default-jdk-headless dotnet10 gcc g++ mono-mcs php-cli
+```
+
+SQL uses Python's built-in `sqlite3` (needs SQLite >= 3.35).

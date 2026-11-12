@@ -24,7 +24,7 @@ python3 codebench.py --compare             # ranking of all stored results
 python3 codebench.py --resume results/<model>/<timestamp>
 ```
 
-Toolchains on Debian: `sudo apt install gcc g++ default-jdk-headless php-cli mono-mcs`. SQL uses Python's built-in `sqlite3` (needs SQLite >= 3.35).
+Toolchains on Debian: `sudo apt install default-jdk-headless dotnet10 gcc g++ mono-mcs php-cli`. SQL uses Python's built-in `sqlite3` (needs SQLite >= 3.35).
 
 **Run `--selftest` after every change. It must end with `Self-test PASSED.`** Test C# on both toolchains when touching C# tasks or the build code: `--csharp mcs` and `--csharp dotnet`.
 
