@@ -2,6 +2,11 @@
 
 Guidance for coding agents working on `codebench.py`.
 
+## Git rules
+
+- In commit messages, instead of **"Co-Authored-By"**, the agent should always use **"Assisted-by"**, without exception. When the agent detects the presence of the **"Co-Authored-By"** tag, it should replace it with **"Assisted-by"**.
+- Never commit or push without authorization or explicit instruction to do so.
+
 ## What this is
 
 `codebench.py` is a single-file, standard-library-only Python benchmark that compares local LLMs on programming tasks. It talks to an OpenAI-compatible endpoint served by llama.cpp (default `http://127.0.0.1:9931`), asks the model to solve 21 tasks, compiles and runs every answer against hidden tests, and writes a Markdown report with a 0-100 score.
