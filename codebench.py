@@ -57,9 +57,10 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 5"
+VERSION = "1.0 Beta 6"
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -483,6 +484,15 @@ LOOP_MIN_REPS = 6        # ... and at least this many copies of the repeated blo
 LOOP_MAX_PERIOD = 2000   # longest repeated block looked for, in characters
 LOOP_CHECK_EVERY = 1500  # characters received between two checks
 
+# Second rule, for loops that change a little on every turn (a counter, a reworded line) and so
+# are never an exact repetition: the last LOOP_Z_WINDOW characters compress to less than
+# LOOP_Z_RATIO of their size on LOOP_Z_CHECKS checks in a row. Calibrated on 186 stored answers:
+# answers that finished normally never stayed that repetitive for more than 2 checks in a row
+# (a model can repeat itself for a while and still recover), the stuck ones did for 7 or more.
+LOOP_Z_WINDOW = 4000
+LOOP_Z_RATIO = 0.10
+LOOP_Z_CHECKS = 6
+
 
 def find_loop(text):
     """Return the period when the end of text is one block repeated verbatim, else 0.
@@ -501,12 +511,14 @@ def find_loop(text):
 
 
 class LoopWatch:
-    """Incremental find_loop() over a stream; keeps only the tail it needs."""
+    """Loop detection over a stream (exact repetition, or lasting near-repetition); keeps only
+    the tail it needs."""
     KEEP = LOOP_MAX_PERIOD * (LOOP_MIN_REPS + 1)
 
     def __init__(self):
         self.tail = ""
         self.pending = 0
+        self.low = 0  # consecutive checks on which the tail was almost pure repetition
 
     def feed(self, piece):
         self.tail = (self.tail + piece)[-self.KEEP:]
@@ -514,7 +526,12 @@ class LoopWatch:
         if self.pending < LOOP_CHECK_EVERY:
             return False
         self.pending = 0
-        return find_loop(self.tail) > 0
+        if find_loop(self.tail) > 0:
+            return True
+        if len(self.tail) >= LOOP_Z_WINDOW:
+            raw = self.tail[-LOOP_Z_WINDOW:].encode("utf-8")
+            self.low = self.low + 1 if len(zlib.compress(raw, 6)) < LOOP_Z_RATIO * len(raw) else 0
+        return self.low >= LOOP_Z_CHECKS
 
 
 class Server:
@@ -662,6 +679,9 @@ class Server:
                     break
             res["content"] = "".join(content)
             res["reasoning"] = "".join(reasoning)
+            if res["finish"] is None and res["error"] is None:
+                # The server went away in the middle of the answer: not the model's fault.
+                res["error"] = "the stream ended without a finish reason (server stopped?)"
         except Exception as e:
             res["error"] = "%s: %s" % (type(e).__name__, e)
         finally:
@@ -786,7 +806,7 @@ def T(name, inp, exp, limit=10.0, weight=1.0, timed=False):
 SEMVER_SPEC = r"""Write a program that sorts semantic versions and resolves version constraints.
 
 INPUT
-Line 1: N (1 <= N <= 2000). Next N lines: one version each, written MAJOR.MINOR.PATCH, optionally followed by -PRERELEASE and/or +BUILD (examples: 1.4.0, 2.0.0-rc.1, 1.0.0-alpha.beta+exp.sha.5114f85). MAJOR, MINOR and PATCH are non-negative integers without leading zeros and may have up to 30 digits. PRERELEASE and BUILD are dot-separated identifiers made of the characters [0-9A-Za-z-]; a numeric prerelease identifier may also have up to 30 digits.
+Line 1: N (1 <= N <= 2000). Next N lines: one version each, written MAJOR.MINOR.PATCH, optionally followed by -PRERELEASE and/or +BUILD (examples: 1.4.0, 2.0.0-rc.1, 1.0.0-alpha.beta+exp.sha.5114f85). MAJOR, MINOR and PATCH are non-negative integers without leading zeros. PRERELEASE and BUILD are dot-separated identifiers made of the characters [0-9A-Za-z-].
 Next line: Q (0 <= Q <= 2000). Next Q lines: one constraint each.
 
 PRECEDENCE (Semantic Versioning 2.0.0)
@@ -798,9 +818,9 @@ PRECEDENCE (Semantic Versioning 2.0.0)
 CONSTRAINTS
 A constraint is one or more comparators separated by single spaces; a version satisfies it when it satisfies ALL comparators. A comparator is an operator immediately followed by a version (never with build metadata):
   =V  >V  >=V  <V  <=V    plain precedence comparisons (=V means "same precedence as V")
-  ^X.Y.Z    >=X.Y.Z and <(X+1).0.0 when X > 0;  >=0.Y.Z and <0.(Y+1).0 when X = 0 and Y > 0;  >=0.0.Z and <0.0.(Z+1) when X = Y = 0
+  ^X.Y.Z    >=X.Y.Z and <(X+1).0.0    (X is never 0 here)
   ~X.Y.Z    >=X.Y.Z and <X.(Y+1).0
-The version after ^ or ~ may carry a prerelease (e.g. ^1.2.3-beta.2): the lower bound then includes that prerelease, while the upper bound is computed from X, Y, Z only.
+The version after ^ or ~ never carries a prerelease.
 Every comparison uses precedence only. There is NO special treatment of prereleases: for example 2.0.0-rc.1 DOES satisfy <2.0.0 and ^1.2.0.
 
 OUTPUT
@@ -824,13 +844,7 @@ def _sv_bounds(comp):
         if comp.startswith(op):
             k = _sv_key(comp[len(op):])
             if op == "^":
-                if k[0] > 0:
-                    hi = (k[0] + 1, 0, 0, 1, ())
-                elif k[1] > 0:
-                    hi = (0, k[1] + 1, 0, 1, ())
-                else:
-                    hi = (0, 0, k[2] + 1, 1, ())
-                return [(">=", k), ("<", hi)]
+                return [(">=", k), ("<", (k[0] + 1, 0, 0, 1, ()))]
             if op == "~":
                 return [(">=", k), ("<", (k[0], k[1] + 1, 0, 1, ()))]
             return [(op, k)]
@@ -881,11 +895,11 @@ def _semver_random(seed, n, q):
     pres = ["alpha", "beta", "rc", "rc-1", "0", "1", "2", "10", "11", "x", "X", "0a", "dev"]
     builds = ["build", "1", "sha.5114f85", "exp", "20260101"]
 
-    def version(with_build=True):
-        s = "%d.%d.%d" % (r.randint(0, 3), r.randint(0, 12), r.randint(0, 12))
-        if r.chance(45):
+    def version(with_build=True, plain=False, min_major=0):
+        s = "%d.%d.%d" % (r.randint(min_major, 3), r.randint(0, 12), r.randint(0, 12))
+        if not plain and r.chance(45):
             s += "-" + ".".join(r.choice(pres) for _ in range(r.randint(1, 3)))
-        if with_build and r.chance(25):
+        if with_build and not plain and r.chance(25):
             s += "+" + r.choice(builds)
         return s
 
@@ -893,7 +907,15 @@ def _semver_random(seed, n, q):
     ops = [">=", "<=", ">", "<", "=", "^", "~"]
     cons = []
     for _ in range(q):
-        parts = [r.choice(ops) + version(False) for _ in range(r.randint(1, 2))]
+        parts = []
+        for _ in range(r.randint(1, 2)):
+            op = r.choice(ops)
+            if op == "^":
+                parts.append(op + version(plain=True, min_major=1))
+            elif op == "~":
+                parts.append(op + version(plain=True))
+            else:
+                parts.append(op + version(False))
         if r.chance(15):
             parts = ["=" + r.choice(versions).split("+")[0]]
         cons.append(" ".join(parts))
@@ -901,39 +923,37 @@ def _semver_random(seed, n, q):
 
 
 def semver_tests():
+    # The first tests have no constraints at all, and the constraint tests use plain versions,
+    # so that a program with one broken feature still earns the others.
+    plain = ["1.0.0", "2.1.0", "1.10.0", "1.9.0", "0.3.7", "1.2.10", "1.2.9", "10.0.0", "0.0.9"]
     cases = [
-        ("basic numeric order", _semver_input(
-            ["1.0.0", "2.1.0", "1.10.0", "1.9.0", "0.3.7", "1.2.10", "1.2.9"],
-            [">=1.0.0", "<1.0.0", "=2.1.0", ">5.0.0", ">1.2.9 <1.9.0", "<=0.3.7"])),
-        ("prerelease chain", _semver_input(
+        ("sort: plain versions", _semver_input(plain, [])),
+        ("sort: prereleases", _semver_input(
             ["1.0.0-rc.1", "1.0.0-beta.11", "1.0.0", "1.0.0-alpha.beta", "1.0.0-alpha",
-             "1.0.0-beta.2", "1.0.0-alpha.1", "1.0.0-beta"],
-            ["<1.0.0", "<1.0.0-beta", ">=1.0.0-beta.3 <1.0.0-rc.1", "=1.0.0-alpha.1",
-             ">1.0.0-rc.1", "<1.0.0-alpha"])),
-        ("build metadata and stability", _semver_input(
-            ["1.0.0+b", "1.0.0-x+z", "1.0.0+a", "1.0.0", "1.0.0-x+a", "1.0.0-x", "0.9.0+zzz"],
-            ["=1.0.0", "=1.0.0-x", "<1.0.0-x", ">=1.0.0", ">1.0.0"])),
-        ("caret and tilde", _semver_input(
-            ["0.0.3", "0.0.4", "0.2.5", "0.3.0", "1.2.3", "1.9.9", "2.0.0-rc.1", "2.0.0",
-             "1.2.3-beta.2", "1.3.0-alpha", "0.2.1"],
-            ["^1.2.3", "~1.2.3", "^0.2.1", "^0.0.3", "~0.2.0", "^1.2.3 <2.0.0-0",
-             "^2.0.0-rc.1", "^1.2.3-beta.1 <1.2.3", "~1.2.3-beta.2", "^0.0.5", "~1.9.0 <1.9.9"])),
-        ("hyphens and mixed identifiers", _semver_input(
+             "1.0.0-beta.2", "1.0.0-alpha.1", "1.0.0-beta", "0.9.9", "1.0.1-alpha"], [])),
+        ("sort: hyphens and mixed identifiers", _semver_input(
             ["1.0.0-alpha-1", "1.0.0-alpha", "1.0.0-0alpha", "1.0.0-10", "1.0.0-9",
              "1.0.0-a.b.c", "1.0.0-a.b", "1.0.0-A", "1.0.0-rc-1.2", "1.0.0-rc-1.10",
-             "1.0.0--", "1.0.0-a.1", "1.0.0-a.a"],
-            ["<1.0.0-a", ">1.0.0-a.b <1.0.0-alpha-1", "<1.0.0-0alpha", "=1.0.0-rc-1.10",
-             ">=1.0.0-a.2 <=1.0.0-a.b"])),
-        ("very large numbers", _semver_input(
-            ["99999999999999999999.0.0", "18446744073709551616.1.0", "18446744073709551615.2.0",
-             "1.0.0-123456789012345678901234567890", "1.0.0-123456789012345678901234567891",
-             "1.0.0-99999999999999999999999999999", "9.123456789012345678901234567890.1",
-             "9.123456789012345678901234567889.7", "9.9.9"],
-            ["<18446744073709551616.0.0", ">1.0.0-123456789012345678901234567890 <1.0.0",
-             "^9.123456789012345678901234567889.0", "~9.9.0", "^18446744073709551615.0.0"])),
+             "1.0.0--", "1.0.0-a.1", "1.0.0-a.a"], [])),
+        ("sort: build metadata and stability", _semver_input(
+            ["1.0.0+b", "1.0.0-x+z", "1.0.0+a", "1.0.0", "1.0.0-x+a", "1.0.0-x", "0.9.0+zzz"], [])),
+        ("constraints: one comparator", _semver_input(
+            plain, [">=1.0.0", "<1.0.0", "=2.1.0", ">2.1.0", "<=0.3.7", ">1.2.9", "=3.0.0", "<0.0.9"])),
+        ("constraints: several comparators and none", _semver_input(
+            plain, [">1.2.9 <1.9.0", ">=1.0.0 <2.0.0", ">5.0.0 <9.0.0", ">=0.3.7 <=0.3.7",
+                    ">1.10.0 <2.1.0", ">=1.2.9 <1.2.10 >0.0.1"])),
+        ("constraints: caret and tilde", _semver_input(
+            ["0.2.5", "0.3.0", "1.2.3", "1.9.9", "2.0.0", "1.2.10", "1.3.0", "0.2.1", "3.4.5"],
+            ["^1.2.3", "~1.2.3", "~0.2.0", "^2.0.1", "~1.9.0 <1.9.9", "^1.0.0 <1.3.0", "~3.4.6",
+             "^3.0.0"])),
+        ("constraints: prereleases and build metadata", _semver_input(
+            ["1.0.0-rc.1", "1.0.0-beta.11", "1.0.0+b", "1.0.0-alpha", "1.0.0-beta.2", "1.0.0+a",
+             "2.0.0-rc.1", "1.2.3"],
+            ["<1.0.0", "<1.0.0-beta.3", ">=1.0.0-beta.3 <1.0.0-rc.1", "=1.0.0", "=1.0.0-alpha",
+             ">1.0.0-rc.1 <1.2.3", "<2.0.0", "^1.2.0", "<1.0.0-alpha"])),
     ]
     tests = [T(name, inp, ref_semver(inp), limit=10.0) for name, inp in cases]
-    for i, (n, q) in enumerate([(30, 30), (120, 120), (400, 300), (2000, 2000)]):
+    for i, (n, q) in enumerate([(30, 30), (400, 300), (2000, 2000)]):
         inp = _semver_random(101 + i, n, q)
         tests.append(T("random %d versions" % n, inp, ref_semver(inp), limit=10.0))
     return tests
@@ -953,6 +973,7 @@ task(id="py_write_semver", lang="python", category="write",
 
 
 # ---- C++: limit order book -------------------------------------------------
+# The reference and the solution also implement a CANCEL command that the task no longer has.
 
 ORDERBOOK_SPEC = r"""Write a limit order book matching engine.
 
@@ -960,16 +981,14 @@ INPUT
 Up to 200000 lines, read until end of input. Each line is one command:
   BUY id price qty
   SELL id price qty
-  CANCEL id
   TOP
-id, price and qty are positive integers (id and price <= 10^9, qty <= 10^6). Every BUY/SELL line has an id never used by another BUY/SELL line.
+id, price and qty are positive integers (id and price <= 10^9, qty <= 10^6). Every id is used by one line only.
 
 RULES
 - The book holds resting orders. A new BUY order matches resting SELL orders whose price is <= the buy price; a new SELL order matches resting BUY orders whose price is >= the sell price.
 - Matching priority: best price first (lowest price among resting SELLs, highest price among resting BUYs); among resting orders with the same price, the one that arrived earlier goes first.
 - Each match trades the minimum of the two remaining quantities at the RESTING order's price and prints:  TRADE buy_id sell_id price qty
 - Matching continues until the incoming order is completely filled or no resting order qualifies; any remaining quantity then rests in the book.
-- CANCEL id: if that order is currently resting in the book (with any remaining quantity) remove it and print  CANCELLED id ; otherwise (unknown id, completely filled, already cancelled) print  NOT_FOUND id
 - TOP prints  TOP bid_price bid_qty ask_price ask_qty  where bid_price is the highest resting BUY price and bid_qty is the total remaining quantity of all resting BUY orders at that price; ask_price/ask_qty are the same for the lowest resting SELL price. When a side is empty print - - for its two fields (example: TOP 100 30 - -).
 
 OUTPUT
@@ -1062,11 +1081,6 @@ def _orderbook_random(seed, n, spread, deep=False):
             lines.append("%s %d %d %d" % (side, next_id, max(1, price), r.randint(1, 1000)))
             ids.append(next_id)
             next_id += 1
-        elif x <= 85:
-            if ids and r.chance(85):
-                lines.append("CANCEL %d" % r.choice(ids))
-            else:
-                lines.append("CANCEL %d" % (10 ** 9 - r.randint(0, 1000)))
         else:
             lines.append("TOP")
     lines.append("TOP")
@@ -1075,27 +1089,26 @@ def _orderbook_random(seed, n, spread, deep=False):
 
 def orderbook_tests():
     cases = [
-        ("simple match", "SELL 1 100 10\nBUY 2 100 4\nTOP\nBUY 3 99 5\nTOP\nBUY 4 105 20\nTOP\n"),
-        ("price priority and resting price",
+        ("one full match", "SELL 1 100 10\nBUY 2 100 10\n"),
+        ("no match: orders rest", "SELL 1 100 10\nBUY 2 99 4\nTOP\nSELL 3 101 1\nBUY 4 98 1\nTOP\n"),
+        ("partial fills", "SELL 1 100 10\nBUY 2 100 4\nTOP\nBUY 3 100 4\nTOP\nBUY 4 100 4\nTOP\n"
+                          "SELL 5 100 1\nSELL 6 100 5\nTOP\n"),
+        ("trade at the resting price", "SELL 1 100 5\nBUY 2 110 5\nBUY 3 90 5\nSELL 4 80 5\n"
+                                       "BUY 5 50 2\nSELL 6 40 1\nTOP\n"),
+        ("price priority",
          "SELL 1 105 5\nSELL 2 101 5\nSELL 3 103 5\nBUY 4 104 12\nTOP\nBUY 5 90 7\nBUY 6 95 7\n"
          "BUY 7 92 7\nSELL 8 91 16\nTOP\n"),
         ("time priority at one price",
          "BUY 10 50 3\nBUY 11 50 4\nBUY 12 50 5\nTOP\nSELL 13 50 5\nTOP\nSELL 14 40 100\nTOP\n"
          "BUY 15 45 1\nTOP\n"),
-        ("cancel variants",
-         "CANCEL 1\nBUY 1 10 5\nCANCEL 1\nCANCEL 1\nSELL 2 20 5\nBUY 3 20 5\nCANCEL 2\nCANCEL 3\n"
-         "SELL 4 30 9\nBUY 5 30 4\nCANCEL 4\nBUY 6 30 5\nTOP\nCANCEL 6\nTOP\n"),
         ("top aggregation and empty sides",
          "TOP\nBUY 1 7 1000000\nBUY 2 7 1000000\nBUY 3 6 5\nTOP\nSELL 4 9 2\nSELL 5 9 3\n"
-         "SELL 6 8 1\nTOP\nCANCEL 6\nTOP\nCANCEL 1\nTOP\nCANCEL 2\nTOP\n"),
-        ("cancelled order keeps queue order",
-         "SELL 1 10 5\nSELL 2 10 5\nSELL 3 10 5\nCANCEL 2\nBUY 4 10 7\nTOP\nSELL 5 10 1\n"
-         "BUY 6 11 4\nTOP\n"),
+         "SELL 6 8 1\nTOP\nBUY 7 8 1\nTOP\nSELL 8 7 2000000\nTOP\nSELL 9 1 5\nTOP\n"),
         ("large quantities", "".join("BUY %d 500 1000000\n" % i for i in range(1, 3001))
          + "TOP\nSELL 9000 1 999999\nSELL 9001 500 2500000000\nTOP\n"),
     ]
     tests = [T(name, inp, ref_orderbook(inp)) for name, inp in cases]
-    for i, (n, spread) in enumerate([(200, 10), (400, 30), (5000, 60)]):
+    for i, (n, spread) in enumerate([(200, 10), (5000, 60)]):
         inp = _orderbook_random(201 + i, n, spread)
         tests.append(T("random %d commands" % n, inp, ref_orderbook(inp)))
     inp = _orderbook_random(299, 200000, 45000, deep=True)
@@ -1173,28 +1186,27 @@ task(id="cpp_write_orderbook", lang="cpp", category="write",
 
 
 # ---- C#: spreadsheet evaluator --------------------------------------------
+# The reference and the solution also implement SUM(range) and a #DIV/0! error that the task
+# no longer has.
 
 SHEET_SPEC = r"""Write a small spreadsheet evaluator.
 
 INPUT
-Line 1: N (1 <= N <= 3000). Next N lines: one assignment each, written CELL=EXPRESSION (for example  B2=A1*2+SUM(A1:A3) ). A cell name is one column letter A-Z followed by a row number 1-99 (no leading zeros). A later assignment to the same cell replaces the earlier one. Spaces may appear anywhere in the expression.
+Line 1: N (1 <= N <= 3000). Next N lines: one assignment each, written CELL=EXPRESSION (for example  B2=A1*2+(C7-1) ). A cell name is one column letter A-Z followed by a row number 1-99 (no leading zeros). A later assignment to the same cell replaces the earlier one. Spaces may appear anywhere in a line.
 
 Expression grammar:
   expr   := term (('+' | '-') term)*
   term   := factor (('*' | '/') factor)*
-  factor := '-' factor | NUMBER | CELL | 'SUM' '(' CELL ':' CELL ')' | '(' expr ')'
-NUMBER is a non-negative decimal integer (at most 10 digits). In SUM(c1:c2), c1 is the top-left and c2 the bottom-right corner of a rectangle of cells (c1's column <= c2's column and c1's row <= c2's row); its value is the sum of all cells in the rectangle.
+  factor := '-' factor | NUMBER | CELL | '(' expr ')'
+NUMBER is a non-negative decimal integer (at most 10 digits).
 
 EVALUATION
-- Values are 64-bit signed integers (no test overflows). '/' is integer division truncated toward zero (-7/2 = -3).
-- A cell that was never assigned has the value 0.
-- A value can also be one of two errors: #CYCLE! and #DIV/0!.
-- A cell whose expression depends on itself, directly or through other cells (including through SUM ranges), has the value #CYCLE!.
-- Every sub-expression is always evaluated (there is no short-circuit). For any operator or SUM: if any operand is #CYCLE! the result is #CYCLE!; otherwise if any operand is #DIV/0! the result is #DIV/0!; otherwise a division whose divisor is 0 gives #DIV/0!; otherwise the result is the integer result. Unary minus keeps an error unchanged.
-  Consequently a cell that references a #CYCLE! cell is itself #CYCLE!, and #CYCLE! wins over #DIV/0!.
+- Values are 64-bit signed integers (no test overflows). '/' is integer division truncated toward zero (-7/2 = -3). No test divides by zero.
+- A cell may refer to cells assigned later in the input. A cell that was never assigned has the value 0.
+- A cell whose expression depends on itself, directly or through other cells, has the value #CYCLE!. A cell that refers to a #CYCLE! cell is itself #CYCLE!.
 
 OUTPUT
-One line per assigned cell (each cell once), sorted by column letter and then by row NUMBER (A2 comes before A10), in the form CELL=VALUE, where VALUE is the integer, #CYCLE! or #DIV/0!."""
+One line per assigned cell (each cell once), sorted by column letter and then by row NUMBER (A2 comes before A10), in the form CELL=VALUE, where VALUE is the integer or #CYCLE!."""
 
 _SHEET_LIMIT = 1 << 62
 
@@ -1345,23 +1357,18 @@ def _sheet_random(seed, ncols, nrows, n):
     def gen(target, depth):
         x = r.randint(1, 100)
         if depth == 0 or x <= 30:
-            y = r.randint(1, 100)
-            if y <= 45:
+            if r.chance(45):
                 return str(r.randint(0, 30))
-            if y <= 90:
-                return ref_cell(target)
-            c1, c2 = sorted([r.randint(0, ncols - 1), r.randint(0, ncols - 1)])
-            r1, r2 = sorted([r.randint(1, nrows), r.randint(1, nrows)])
-            if r.chance(80):
-                c2 = min(c2, c1 + 1)
-                r2 = min(r2, r1 + 2)
-            return "SUM(%s%d:%s%d)" % (chr(65 + c1), r1, chr(65 + c2), r2)
+            return ref_cell(target)
         if x <= 40:
             return "-" + gen(target, depth - 1)
         if x <= 50:
             return "(" + gen(target, depth - 1) + ")"
         op = r.choice(["+", "+", "-", "-", "*", "/"])
         pad = " " if r.chance(30) else ""
+        if op == "/":
+            # Divisors are non-zero literals: the task has no division by zero.
+            return gen(target, depth - 1) + pad + op + pad + str(r.randint(1, 9))
         return gen(target, depth - 1) + pad + op + pad + gen(target, depth - 1)
 
     lines = []
@@ -1379,37 +1386,37 @@ def sheet_tests():
                                           chr(65 + ((i - 1) // 99)), (i - 1) % 99 + 1)
                         for i in range(1, 400)]
     chain_rev = list(reversed(chain))
+    # Each test needs as few features as possible: constants first, then references, then cycles.
     cases = [
-        ("arithmetic and precedence", mk("A1=1+2*3", "A2=(1+2)*3", "A3=10-4-3", "A4=100/7/2",
-                                         "A5=2*3+4*5-6/2", "B1=7", "B2=1234567890*8")),
-        ("references and unassigned cells", mk("C3=A1+B2", "A1=5", "B2=A1*A1", "D1=Z99+1",
-                                               "D2=C3-D1", "E1=E2", "E2=40+2")),
-        ("truncating division and div by zero",
-         mk("A1=-7/2", "A2=7/-2", "A3=-7/-2", "A4=0-9", "A5=A4/2", "B1=5/0", "B2=B1+1",
-            "B3=0/5", "B4=3/(2-2)", "B5=-B1", "C1=B3/B3", "C2=7/C9")),
-        ("SUM over rectangles", mk("A1=1", "A2=2", "A3=3", "B1=10", "B2=20", "B3=30", "C1=SUM(A1:A3)",
-                                   "C2=SUM(A1:B3)", "C3=SUM(B2:B2)", "C4=SUM(D1:E9)",
-                                   "C5=SUM(A1:B2)*SUM(A3:B3)", "D7=SUM(C1:C5)", "B9=5/0",
-                                   "D8=SUM(B1:B9)")),
-        ("cycles", mk("A1=A1", "B1=B2", "B2=B3+1", "B3=B1*2", "C1=B2+5", "C2=7", "C3=C2+C2",
-                      "D1=SUM(D1:D3)", "D2=4", "E1=SUM(E2:F3)", "F3=E1", "E2=1", "G1=C1-C1",
-                      "H1=0*A1")),
-        ("error precedence", mk("A1=A1", "B1=1/0", "C1=B1+A1", "C2=A1+B1", "C3=SUM(A1:B1)",
-                                "C4=B1/A1", "C5=A1/0", "C6=(1/0)*(2/0)", "C7=B1-B1", "D1=C7+1",
-                                "D2=5/(B1)", "D3=-C1", "D4=(1/0)/A1")),
-        ("override and ordering", mk("A10=1", "A2=2", "A1=3", "Z1=4", "B11=5", "B2=6", "A2=A10+40",
-                                     "A9=9", "A10=10", "M5=A2", "A99=SUM(A1:A98)", "A1=A1",
-                                     "A1=33")),
-        ("whitespace and unary minus", mk("A1= 3 +  4", "A2 = - - 3", "A3=2*-3", "A4=-(A1)",
-                                          "A5=-( 2 + 3 ) * - 2", "A6= SUM ( A1 : A5 ) ",
-                                          "A7=--A1--A2", "A8=( ( ( 7 ) ) )", "A9=8/-3")),
+        ("constants", mk("A1=7", "B1=0", "C1=1234567890", "D1=42")),
+        ("arithmetic and precedence", mk("A1=1+2*3", "A2=10-4-3", "A3=100/7/2", "A4=2*3+4*5-6/2",
+                                         "B1=7", "B2=1234567890*8", "B3=2-3*4")),
+        ("parentheses", mk("A1=(1+2)*3", "A2=((7))", "A3=2*(3+(4-1))*2", "A4=(10-4)-(3-1)",
+                           "A5=100/(7-2)")),
+        ("unary minus and truncating division", mk("A1=-7/2", "A2=7/-2", "A3=-7/-2", "A4=0-9",
+                                                   "A5=--3", "A6=2*-3", "A7=-(2+3)*-2", "A8=8/-3",
+                                                   "A9=-0")),
+        ("whitespace", mk("A1= 3 +  4", "A2 = - - 3", "A3=( ( ( 7 ) ) )", "A4= 2 * ( 1 + 1 ) ",
+                          " A5=10 / 3")),
+        ("references to earlier cells", mk("A1=5", "B2=A1*A1", "C3=A1+B2", "D4=C3-B2-A1", "E5=-A1",
+                                           "F6=(A1+B2)*2")),
+        ("forward references and unassigned cells", mk("C3=A1+B2", "B2=A1*A1", "A1=5", "D1=Z99+1",
+                                                       "D2=C3-D1", "E1=E2", "E2=40+2")),
+        ("output order", mk("A10=1", "A2=2", "B11=5", "Z1=4", "A1=3", "B2=6", "A9=9", "M5=8",
+                            "A99=7", "B1=0")),
+        ("reassigned cells", mk("A1=1", "A2=A1+1", "A1=10", "B1=A2", "B1=A2*2", "A3=5", "A3=A3",
+                                "A3=6")),
+        ("cycle: a cell that refers to itself", mk("A1=A1", "B1=5", "C1=C1+1", "D1=B1*2")),
+        ("cycles through other cells", mk("B1=B2", "B2=B3+1", "B3=B1*2", "C1=B2+5", "C2=7",
+                                          "C3=C2+C2", "G1=C1-C1", "H1=0*B1", "D1=D2", "D2=D1",
+                                          "E1=C3+1")),
         ("long chain", mk(*chain)),
         ("long chain, reverse order", mk(*chain_rev)),
     ]
     tests = [T(name, inp, ref_sheet(inp)) for name, inp in cases]
     seed = 300
     made = 0
-    sizes = [(4, 6, 40), (6, 9, 120), (10, 20, 600), (26, 60, 3000)]
+    sizes = [(4, 6, 40), (10, 20, 600), (26, 60, 3000)]
     while made < len(sizes):
         seed += 1
         inp = _sheet_random(seed, *sizes[made])
@@ -1417,6 +1424,7 @@ def sheet_tests():
             exp = ref_sheet(inp)
         except _SheetOverflow:
             continue
+        assert "#DIV" not in exp
         tests.append(T("random sheet %d assignments" % sizes[made][2], inp, exp))
         made += 1
     return tests
@@ -1519,7 +1527,7 @@ class Program {
 '''
 
 task(id="cs_write_sheet", lang="csharp", category="write",
-     title="Spreadsheet evaluator with ranges, cycles and errors",
+     title="Spreadsheet evaluator with references and cycles",
      spec=SHEET_SPEC, tests=sheet_tests, solution=SHEET_SOLUTION)
 
 
@@ -1527,21 +1535,19 @@ task(id="cs_write_sheet", lang="csharp", category="write",
 
 CSV_SPEC = r"""Write a program that aggregates a CSV file.
 
-INPUT (standard input): CSV text in RFC 4180 style.
-- Records are separated by a line break (LF or CRLF); the last record may or may not end with one.
-- Fields are separated by commas. A field may be enclosed in double quotes; a quoted field may contain commas, line breaks and double quotes, where a literal double quote is written as two double quotes (""). Nothing else is an escape: a backslash is an ordinary character.
+INPUT (standard input): CSV text.
+- One record per line (lines end with LF). Completely empty lines are ignored.
+- Fields are separated by commas. A field may be enclosed in double quotes; a quoted field may contain commas and double quotes, where a literal double quote is written as two double quotes (""). No field contains a line break or a backslash.
 - Spaces are significant and are never trimmed.
-- Completely empty lines between records are ignored.
 The first record is the header. It always contains a column named category and a column named amount (at any position, possibly among other columns).
 A data record is valid when it has exactly as many fields as the header; any other data record is counted as skipped and otherwise ignored.
-In valid records amount matches -?[0-9]+(\.[0-9]{1,2})? with at most 15 integer digits.
+In valid records amount matches -?[0-9]+(\.[0-9]{1,2})? with at most 9 integer digits.
 
 OUTPUT
-A CSV whose first line is exactly  category,count,total  followed by one line per distinct category (categories are compared as exact byte strings; the empty string is a valid category): the category, the number of valid records having it, and the exact sum of their amounts printed with exactly two decimals (examples: 12.50, -0.05, 0.00).
-Sums must be exact: binary floating point is not precise enough for the largest inputs (every sum fits in a signed 64-bit count of cents).
+One line per distinct category (categories are compared as exact strings; the empty string is a valid category), in the form  category,count,total : the category, the number of valid records having it, and the sum of their amounts printed with exactly two decimals (examples: 12.50, -0.05, 0.00).
 Lines are sorted by total descending, then by category ascending (byte order).
-In the output a category is enclosed in double quotes (with inner double quotes doubled) if and only if it contains a comma, a double quote, CR or LF. Use LF as the output line break.
-After the last category print one final line  skipped=N  where N is the number of skipped records."""
+In the output a category is enclosed in double quotes (with inner double quotes doubled) if and only if it contains a comma or a double quote.
+After the last category print one final line  skipped=N  where N is the number of skipped records. There is no header line in the output."""
 
 
 def _csv_parse(text):
@@ -1614,7 +1620,7 @@ def ref_csv(inp):
         cat = rec[ci]
         totals[cat] = totals.get(cat, 0) + _cents(rec[ai])
         counts[cat] = counts.get(cat, 0) + 1
-    out = ["category,count,total"]
+    out = []
     for cat in sorted(totals, key=lambda c: (-totals[c], c.encode("utf-8"))):
         name = cat
         if any(ch in cat for ch in ',"\r\n'):
@@ -1624,20 +1630,19 @@ def ref_csv(inp):
     return "\n".join(out) + "\n"
 
 
-def _csv_random(seed, n, crlf=False):
+def _csv_random(seed, n):
     r = Rng(seed)
-    cats = ["food", "rent", "Food", "tools, small", 'the "big" one', "multi\nline", "", " food",
-            "a\\b", "caf\u00e9", "x" * 40, "taxes", "rent "]
+    cats = ["food", "rent", "Food", "tools, small", 'the "big" one', "", " food",
+            "caf\u00e9", "x" * 40, "taxes", "rent "]
     ncols = r.randint(3, 6)
     cols = ["c%d" % i for i in range(ncols)]
     ci, ai = r.randint(0, ncols - 1), r.randint(0, ncols - 1)
     while ai == ci:
         ai = r.randint(0, ncols - 1)
     cols[ci], cols[ai] = "category", "amount"
-    eol = "\r\n" if crlf else "\n"
 
-    def q(s, force=False):
-        if force or any(ch in s for ch in ',"\r\n') or (s and r.chance(15)):
+    def q(s):
+        if any(ch in s for ch in ',"') or (s and r.chance(15)):
             return '"' + s.replace('"', '""') + '"'
         return s
 
@@ -1659,55 +1664,53 @@ def _csv_random(seed, n, crlf=False):
                     amt = "-" + amt
                 fields.append(q(amt) if r.chance(10) else amt)
             else:
-                fields.append(q(r.choice(["note", "a,b", 'say "hi"', "", "line1\nline2", "0", "\\"])))
+                fields.append(q(r.choice(["note", "a,b", 'say "hi"', "", "0"])))
         if x <= 13:
             if r.chance(50):
                 fields.append("extra")
             else:
                 fields.pop()
         lines.append(",".join(fields))
-    text = eol.join(lines)
-    if r.chance(60):
-        text += eol
-    return text
+    return "\n".join(lines) + "\n"
 
 
 def csv_tests():
     big = ["id,amount,category"]
     for i in range(60):
-        big.append("%d,%s,%s" % (i, "123456789012345.%02d" % (i % 100), "huge" if i % 2 else "huge2"))
-    big += ["x,0.01,cent"] * 7 + ["y,0.1,dime"] * 3 + ["z,-999999999999999.99,neg"] * 2
+        big.append("%d,%s,%s" % (i, "123456789.%02d" % (i % 100), "huge" if i % 2 else "huge2"))
+    big += ["x,0.01,cent"] * 7 + ["y,0.1,dime"] * 3 + ["z,-999999999.99,neg"] * 2
+    # Totals are all different unless a test is about ties, and only the later tests have
+    # quotes, skipped records or blank lines: one missing feature costs only its own tests.
     cases = [
-        ("simple", "category,amount\nfood,10.50\nrent,700\nfood,2.25\ntools,0.05\n"),
+        ("one record per category", "category,amount\nrent,700.00\nfood,10.50\ntools,0.25\n"),
+        ("counts and sums", "category,amount\nfood,10.50\nrent,700.00\nfood,2.25\ntools,0.05\n"
+                            "food,1.25\nrent,0.50\n"),
+        ("two-decimal formatting", "category,amount\na,700\nb,10.5\nc,3\nc,0.25\nd,0.1\nd,0.2\n"
+                                   "e,0.07\n"),
         ("column positions and extra columns",
          "date,amount,note,category,id\n2026-01-01,5,x,books,1\n2026-01-02,7.5,y,games,2\n"
          "2026-01-03,1.25,z,books,3\n"),
-        ("quoted commas and quotes",
-         'category,amount\n"tools, small",3.10\n"the ""big"" one",4\n"plain",1\n'
-         'plain,2\n"""quoted""",9.99\n"a,""b"",c",0.01\n'),
-        ("line breaks inside quotes",
-         'note,category,amount\n"first\nsecond","multi\nline",5\nx,"multi\nline",6.5\n'
-         '"a\n\nb",single,1\n"x","tail\n",2\n'),
-        ("CRLF and no final newline",
-         'category,amount,note\r\nfood,1.10,"a\r\nb"\r\nrent,2.20,x\r\n\r\nfood,3.30,y\r\nrent,0.7,'),
-        ("skipped records and blank lines",
-         "category,amount,x\n\nfood,1,a\nfood,2\nrent,5,b,c\n\n\nrent,3,d\nonly\nfood,4,e\n,0,\n"),
-        ("backslash is not an escape",
-         'path,category,amount\n"C:\\dir\\",files,3.50\n"a\\""b","back\\slash",1.00\n'
-         'x,"q\\",2\ny,files,0.50\n'),
-        ("exact large sums and negatives", "\n".join(big) + "\n"),
-        ("ordering, ties, negative and zero totals",
-         "category,amount\nb,5\na,5\nc,-0.05\nd,0.05\nd,-0.05\ne,-3\nB,5\nab,5\n zz,5\n"
-         "f,-0.5\nf,0.45\n"),
-        ("spaces, empty category, quoted empty line",
-         'category,amount\n food,1\nfood,2\nfood ,4\n,8\n"",16\n" ",32\n""\n"food",64\n'),
-        ("single column order and quoted header",
-         '"amount","category"\n"7.00","x"\n3,"y"\n"0.5",x\n'),
+        ("negative and zero totals", "category,amount\na,5\nc,-0.05\nd,0.05\nd,-0.05\ne,-3\n"
+                                     "f,-0.5\nf,0.25\ng,-10\ng,12.5\n"),
+        ("ties are ordered by category", "category,amount\nb,5\na,5\nB,5\nab,5\nc,2.5\nc,2.5\n"
+                                         "z,9\nd,1\n"),
+        ("skipped records", "category,amount,x\nfood,1,a\nfood,2\nrent,5,b,c\nrent,3,d\nonly\n"
+                            "food,4,e\n"),
+        ("blank lines", "category,amount\n\nfood,1\n\n\nrent,3\nfood,4\n\n"),
+        ("quoted fields with commas",
+         'category,amount,note\n"tools, small",3.10,x\nplain,1,"a,b,c"\n"plain",2,"y"\n'
+         '"a,b",0.01,z\n'),
+        ("doubled quotes",
+         'category,amount\n"the ""big"" one",4\n"""quoted""",9.99\n"a,""b"",c",0.01\nplain,1\n'),
+        ("spaces and empty category",
+         'category,amount\n food,1\nfood,2\nfood ,4\n,8\n"",16\n" ",32\n"food",64\n'),
+        ("quoted header and quoted amounts", '"amount","category"\n"7.00","x"\n3,"y"\n"0.5",x\n'),
+        ("large sums", "\n".join(big) + "\n"),
     ]
     tests = [T(name, inp, ref_csv(inp)) for name, inp in cases]
-    for i, (n, crlf) in enumerate([(40, False), (200, True), (3000, False)]):
-        inp = _csv_random(401 + i, n, crlf)
-        tests.append(T("random %d records%s" % (n, " (CRLF)" if crlf else ""), inp, ref_csv(inp)))
+    for i, n in enumerate([40, 3000]):
+        inp = _csv_random(401 + i, n)
+        tests.append(T("random %d records" % n, inp, ref_csv(inp)))
     return tests
 
 
@@ -1764,7 +1767,7 @@ usort($keys, function ($a, $b) use ($totals, $names) {
     if ($totals[$a] !== $totals[$b]) { return $totals[$a] > $totals[$b] ? -1 : 1; }
     return strcmp($names[$a], $names[$b]);
 });
-$out = "category,count,total\n";
+$out = "";
 foreach ($keys as $key) {
     $cat = $names[$key];
     if (strpbrk($cat, ",\"\r\n") !== false) { $cat = '"' . str_replace('"', '""', $cat) . '"'; }
@@ -1777,10 +1780,11 @@ echo $out . "skipped=" . $skipped . "\n";
 '''
 
 task(id="php_write_csv", lang="php", category="write",
-     title="RFC 4180 CSV parser and exact aggregation",
+     title="CSV parser and aggregation",
      spec=CSV_SPEC, tests=csv_tests, solution=CSV_SOLUTION)
 
 
+# The reference and the solution also implement a power operator (^) that the task no longer has.
 # ---- Java: exact rational calculator --------------------------------------
 
 RATIONAL_SPEC = r"""Write an exact rational-number calculator.
@@ -1789,16 +1793,13 @@ INPUT
 Lines until end of input (at most 2000 lines, each at most 2000 characters). Each line holds one expression. Spaces and tabs may appear anywhere between tokens. Grammar:
   expr  := term (('+' | '-') term)*
   term  := unary (('*' | '/') unary)*
-  unary := '-' unary | power
-  power := atom ('^' unary)?
+  unary := '-' unary | atom
   atom  := INTEGER | '(' expr ')'
 INTEGER is a sequence of 1 to 40 decimal digits. Every line is syntactically valid.
 
 SEMANTICS
-- Exact arithmetic on rational numbers of unlimited size; '/' is exact division.
-- '^' is exponentiation. As the grammar says, it binds tighter than a unary minus on its left and is right-associative: -2^2 = -4, 2^-3 = 1/8, 2^3^2 = 2^9 = 512, (-2)^2 = 4.
-- Unless an error occurs, an exponent always evaluates to an integer whose absolute value is at most 64. x^0 = 1 for every x (including 0). A negative exponent means the reciprocal of the positive power.
-- A division by zero, or zero raised to a negative exponent, anywhere in the expression makes the result of the whole line ERROR.
+- Exact arithmetic on rational numbers of unlimited size; '/' is exact division (1/3 stays one third).
+- A division by zero anywhere in the expression makes the result of the whole line ERROR. The following lines are still evaluated.
 
 OUTPUT
 One line per expression: ERROR, or the result as a fraction in lowest terms p/q with q > 0, printed as just p when q = 1 (examples: -7/3, 5, 0)."""
@@ -1899,55 +1900,47 @@ def _rat_random(seed, n, big=False):
     def sp():
         return r.choice(["", "", "", " ", "  ", "\t"])
 
-    def gen(depth, allow_pow=True):
+    def gen(depth):
         x = r.randint(1, 100)
-        if depth == 0 or x <= 22:
+        if depth == 0 or x <= 25:
             return num()
-        if x <= 32:
-            return "-" + sp() + gen(depth - 1, allow_pow)
-        if x <= 44:
-            return "(" + sp() + gen(depth - 1, allow_pow) + sp() + ")"
-        if x <= 58 and allow_pow:
-            base = r.choice([num(), "(" + gen(depth - 1, False) + ")"])
-            y = r.randint(1, 100)
-            if y <= 55:
-                e = str(r.randint(0, 6))
-            elif y <= 80:
-                e = "-" + sp() + str(r.randint(0, 5))
-            elif y <= 90:
-                e = "%d^%d" % (r.randint(0, 3), r.randint(0, 3))
-            else:
-                e = "(%d%s%d)" % (r.randint(0, 4), r.choice(["+", "-", "*"]), r.randint(0, 3))
-            return base + sp() + "^" + sp() + e
+        if x <= 37:
+            return "-" + sp() + gen(depth - 1)
+        if x <= 52:
+            return "(" + sp() + gen(depth - 1) + sp() + ")"
         op = r.choice(["+", "-", "*", "/"])
-        return gen(depth - 1, allow_pow) + sp() + op + sp() + gen(depth - 1, allow_pow)
+        return gen(depth - 1) + sp() + op + sp() + gen(depth - 1)
 
     return "\n".join(gen(r.randint(2, 5)) for _ in range(n)) + "\n"
 
 
 def rational_tests():
-    deep = "(" * 700 + "1" + ")" * 700
-    deep2 = "1" + "".join("+(2" for _ in range(600)) + ")" * 600
+    deep = "(" * 60 + "1" + ")" * 60
+    deep2 = "1" + "".join("+(2" for _ in range(60)) + ")" * 60
+    # From integers only to fractions, signs and errors: each test adds one feature.
     cases = [
-        ("basic operations", "1+2\n7-10\n3*4\n8/4\n1+2*3\n(1+2)*3\n10-4-3\n100/5/2\n0\n2*3+4*5\n"),
+        ("integer results", "1+2\n7-3\n3*4\n8/4\n0\n12345\n100/5/2\n6*7-2\n"),
+        ("precedence and parentheses", "1+2*3\n(1+2)*3\n10-4-3\n10-(4-3)\n2*3+4*5\n2*(3+4)*5\n"
+                                       "((2))\n100/(5*2)\n100/5*2\n"),
         ("fractions in lowest terms", "1/3\n2/6\n1/3+1/6\n3/4-1/4\n6/4\n1/2*2/3\n1/2/3\n1/(2/3)\n"
                                       "7/7\n0/5\n5/10+5/10\n22/7-3\n"),
-        ("signs", "-1/2\n1/-2\n-1/-2\n-(1/2)\n--3\n3--3\n3-(-3)\n-0\n0/-7\n-(3-5)/4\n2*-3\n1/3-1/2\n"),
-        ("powers", "2^10\n-2^2\n(-2)^2\n2^-3\n2^3^2\n(2^3)^2\n(2/3)^3\n(2/3)^-2\n0^0\n5^0\n"
-                   "(-1/2)^3\n2^-1^2\n-2^-2\n2^(1+2)\n(1/2)^-(3)\n10^20\n2^--2\n-(2)^2*3\n"),
-        ("errors", "1/0\n1/(2-2)\n0^-1\n0^(1-2)\n5+1/0*0\n0*(1/0)\n(1/0)^0\n2^(1/0)\n"
-                   "1/(1/3-2/6)\n0^0\n(3-3)^-2+1\n7\n"),
+        ("negative results", "7-10\n1/3-1/2\n0-5\n2*(3-9)\n(1-4)/6\n3/(2-5)\n(2-3)/(4-7)\n0/(1-2)\n"),
+        ("unary minus", "-1/2\n1/-2\n-1/-2\n-(1/2)\n--3\n3--3\n3-(-3)\n-0\n-(3-5)/4\n2*-3\n-2*-3\n"
+                        "---5\n"),
+        ("division by zero", "1/0\n1/(2-2)\n5+1/0*0\n0*(1/0)\n1/(1/3-2/6)\n(3-3)/(3-3)\n-(1/0)\n"),
+        ("lines after an error", "1/0\n7\n1/2\n2/(1-1)\n3*3\n0/0\n0/1\n"),
         ("big integers", "1234567890123456789012345678901234567890+1\n"
                          "9999999999999999999999999999999999999999*9999999999999999999999999999999999999999\n"
                          "1234567890123456789012345678901234567890/9876543210987654321098765432109876543210\n"
-                         "(1000000000000000000000000000000000000007)^3\n"
-                         "2^64-1\n3^64/3^62\n(10^40+1)/(10^20)\n18446744073709551616*18446744073709551616\n"
-                         "9223372036854775807+1\n4294967296*4294967296\n"),
-        ("whitespace and deep nesting", "  1 +\t2  \n( ( 3 ) )\n 4 /\t( 2 * ( 1 + 1 ) ) \n"
-                                        + deep + "\n" + deep2 + "\n\t-\t(\t5\t)\t^\t2\n"),
+                         "18446744073709551616*18446744073709551616\n"
+                         "9223372036854775807+1\n4294967296*4294967296\n"
+                         "1/3+1/7+1/11+1/13+1/17+1/19+1/23+1/29+1/31+1/37+1/41+1/43+1/47+1/53+1/59\n"),
+        ("whitespace", "  1 +\t2  \n( ( 3 ) )\n 4 /\t( 2 * ( 1 + 1 ) ) \n\t-\t(\t5\t)\t*\t2\n"
+                       "1   /   3\n"),
+        ("deep nesting", deep + "\n" + deep2 + "\n" + "-" * 40 + "7\n"),
     ]
     tests = [T(name, inp, ref_rational(inp)) for name, inp in cases]
-    for i, (n, big) in enumerate([(60, False), (300, False), (300, True), (2000, True)]):
+    for i, (n, big) in enumerate([(60, False), (300, True), (2000, True)]):
         inp = _rat_random(501 + i, n, big)
         tests.append(T("random %d expressions%s" % (n, " (large integers)" if big else ""),
                        inp, ref_rational(inp)))
@@ -2035,7 +2028,7 @@ public class Main {
 '''
 
 task(id="java_write_rational", lang="java", category="write",
-     title="Exact rational calculator (BigInteger, powers, errors)",
+     title="Exact rational calculator (big integers, errors)",
      spec=RATIONAL_SPEC, tests=rational_tests, solution=RATIONAL_SOLUTION)
 
 
@@ -3638,41 +3631,63 @@ def R(name, passed, detail="", weight=1.0):
     return {"name": name, "passed": bool(passed), "detail": detail, "weight": weight, "secs": 0.0}
 
 
+def run_script(conn, statements):
+    """Execute a script the way the sqlite3 shell does: a statement that fails is skipped and
+    the rest still runs, so one invalid trigger does not void the tables next to it.
+    Returns the first error message, or "" when every statement ran.
+    """
+    first = ""
+    for s in statements:
+        try:
+            conn.execute(s)
+        except Exception as e:
+            if not first:
+                first = shorten("%s (in: %s)" % (e, " ".join(s.split())), 200)
+    return first
+
+
 def run_steps(schema, steps):
     """Run a behaviour check on a fresh database. Returns (passed, detail)."""
     conn = sql_connect()
     sql_guard(conn, 10)
     try:
-        try:
-            for s in schema:
-                conn.execute(s)
-        except Exception as e:
-            return False, "script failed: %s" % shorten(str(e), 200)
-        for step in steps:
-            kind, sql = step[0], step[1]
-            if kind == "do":
-                try:
-                    conn.execute(sql)
-                except Exception as e:
-                    return False, "valid statement was rejected: %s -> %s" % (shorten(sql, 120), shorten(str(e), 120))
-            elif kind == "fail":
-                try:
-                    conn.execute(sql)
-                except Exception:
-                    continue
-                return False, "statement should have failed: %s" % shorten(sql, 160)
-            else:
-                try:
-                    got = sql_fetch(conn, sql)
-                except Exception as e:
-                    return False, "query failed: %s -> %s" % (shorten(sql, 120), shorten(str(e), 120))
-                want = norm_rows(step[2])
-                if got != want:
-                    return False, "%s -> got %s, expected %s" % (shorten(sql, 100), shorten(repr(got), 160),
-                                                              shorten(repr(want), 160))
-        return True, ""
+        broken = run_script(conn, schema)
+        ok, detail = check_steps(conn, steps)
+        if not ok and broken:
+            detail = "%s | script error: %s" % (detail, broken)
+        return ok, detail
     finally:
         conn.close()
+
+
+def check_steps(conn, steps):
+    for step in steps:
+        kind, sql = step[0], step[1]
+        if kind == "do":
+            try:
+                conn.execute(sql)
+            except Exception as e:
+                return False, "valid statement was rejected: %s -> %s" % (shorten(sql, 120), shorten(str(e), 120))
+        elif kind == "fail":
+            try:
+                conn.execute(sql)
+            except Exception as e:
+                # A table or column missing from a broken script is not a rule being enforced.
+                if str(e).startswith("no such "):
+                    return False, "statement failed for the wrong reason: %s -> %s" % (
+                        shorten(sql, 120), shorten(str(e), 120))
+                continue
+            return False, "statement should have failed: %s" % shorten(sql, 160)
+        else:
+            try:
+                got = sql_fetch(conn, sql)
+            except Exception as e:
+                return False, "query failed: %s -> %s" % (shorten(sql, 120), shorten(str(e), 120))
+            want = norm_rows(step[2])
+            if got != want:
+                return False, "%s -> got %s, expected %s" % (shorten(sql, 100), shorten(repr(got), 160),
+                                                          shorten(repr(want), 160))
+    return True, ""
 
 
 def grade_behaviour(answer, checks):
@@ -3853,8 +3868,7 @@ def _shop_index_check(answer):
     schema = sql_statements(answer)
     conn = sql_connect()
     try:
-        for s in schema:
-            conn.execute(s)
+        run_script(conn, schema)
         for row in conn.execute("PRAGMA index_list('orders')").fetchall():
             cols = conn.execute("PRAGMA index_info('%s')" % row[1].replace("'", "''")).fetchall()
             if cols and cols[0][2] == "customer_id":
@@ -4130,26 +4144,24 @@ task(id="sql_query_bom", lang="sql", category="sql",
 
 # ---- SQL 3: window functions (login streaks) -------------------------------
 
-STREAK_SCHEMA = ["CREATE TABLE logins (user_id INTEGER NOT NULL, login_at TEXT NOT NULL)"]
+STREAK_SCHEMA = ["CREATE TABLE logins (user_id INTEGER NOT NULL, day INTEGER NOT NULL)"]
 
 STREAK_SPEC = r"""A SQLite database has this table:
 
-  CREATE TABLE logins (user_id INTEGER NOT NULL, login_at TEXT NOT NULL);
+  CREATE TABLE logins (user_id INTEGER NOT NULL, day INTEGER NOT NULL);
 
-login_at is a UTC timestamp formatted 'YYYY-MM-DD HH:MM:SS'. A user can log in many times on the same day.
+Each row records one login. day is a day number (an integer; consecutive calendar days have consecutive numbers). A user can log in many times on the same day.
 
-Write ONE SELECT statement (it may start with WITH) that returns, for every user present in the table, the longest streak of consecutive calendar days on which the user logged in at least once:
+Write ONE SELECT statement (it may start with WITH) that returns, for every user present in the table, the longest streak of consecutive days on which the user logged in at least once:
   user_id, streak_start, streak_end, streak_days
-streak_start and streak_end are dates formatted 'YYYY-MM-DD'; streak_days is the number of days in the streak. When a user has several longest streaks of the same length, report the most recent one.
+streak_start and streak_end are the first and the last day number of the streak; streak_days is the number of days in it. When a user has several longest streaks of the same length, report the most recent one.
 Order the result by streak_days descending, then user_id ascending.
 
 Answer with the SELECT statement only, in one ```sql block."""
 
 STREAK_SOLUTION = r"""
-WITH d AS (SELECT DISTINCT user_id, date(login_at) AS day FROM logins),
-g AS (SELECT user_id, day,
-             CAST(julianday(day) AS INTEGER) - ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY day) AS grp
-      FROM d),
+WITH d AS (SELECT DISTINCT user_id, day FROM logins),
+g AS (SELECT user_id, day, day - ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY day) AS grp FROM d),
 s AS (SELECT user_id, MIN(day) AS s, MAX(day) AS e, COUNT(*) AS n FROM g GROUP BY user_id, grp),
 r AS (SELECT s.*, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY n DESC, s DESC) AS rn FROM s)
 SELECT user_id, s AS streak_start, e AS streak_end, n AS streak_days
@@ -4160,23 +4172,23 @@ ORDER BY n DESC, user_id;
 
 def _streak_expected(rows):
     days = {}
-    for uid, ts in rows:
-        days.setdefault(uid, set()).add(datetime.date.fromisoformat(ts[:10]))
+    for uid, day in rows:
+        days.setdefault(uid, set()).add(day)
     out = []
     for uid, ds in days.items():
         ordered = sorted(ds)
         best = None
         start = prev = ordered[0]
         for d in ordered[1:] + [None]:
-            if d is not None and (d - prev).days == 1:
+            if d is not None and d - prev == 1:
                 prev = d
                 continue
-            length = (prev - start).days + 1
+            length = prev - start + 1
             if best is None or length >= best[2]:
                 best = (start, prev, length)
             if d is not None:
                 start = prev = d
-        out.append((uid, best[0].isoformat(), best[1].isoformat(), best[2]))
+        out.append((uid, best[0], best[1], best[2]))
     out.sort(key=lambda r: (-r[3], r[0]))
     return out
 
@@ -4185,47 +4197,42 @@ def _streak_dataset(name, rows):
     return (name, STREAK_SCHEMA + [("INSERT INTO logins VALUES (?, ?)", rows)], _streak_expected(rows))
 
 
-def _streak_random(seed, users, span):
+def _streak_random(seed, users, span, repeats=3):
     r = Rng(seed)
-    base = datetime.date(2025, 12, 20)
     rows = []
     for uid in range(1, users + 1):
-        day = r.randint(0, 5)
+        day = 700 + r.randint(0, 5)
         for _ in range(r.randint(1, span)):
             day += 1 if r.chance(72) else r.randint(2, 6)
-            for _ in range(r.randint(1, 3)):
-                t = r.choice(["00:00:00", "23:59:59", "12:30:00", "%02d:%02d:%02d" % (
-                    r.randint(0, 23), r.randint(0, 59), r.randint(0, 59))])
-                rows.append((uid * 7 % 101, "%s %s" % ((base + datetime.timedelta(days=day)).isoformat(), t)))
+            for _ in range(r.randint(1, repeats)):
+                rows.append((uid * 7 % 101, day))
     r.shuffle(rows)
     return rows
 
 
 def streak_grade(answer, scale=1.0):
+    # Streak lengths differ between users unless a test is about ties, and only the later
+    # tests repeat a day: a query without DISTINCT still earns the first ones.
     datasets = [
-        _streak_dataset("simple", [(1, "2026-01-01 10:00:00"), (1, "2026-01-02 11:00:00"), (1, "2026-01-03 09:00:00"),
-                                   (1, "2026-01-07 09:00:00"), (2, "2026-01-05 08:00:00"), (2, "2026-01-06 08:00:00")]),
-        _streak_dataset("several logins per day",
-                        [(1, "2026-02-01 00:00:00"), (1, "2026-02-01 23:59:59"), (1, "2026-02-02 00:00:00"),
-                         (1, "2026-02-02 12:00:00"), (1, "2026-02-02 12:00:00"), (2, "2026-02-01 05:00:00"),
-                         (2, "2026-02-01 06:00:00"), (2, "2026-02-01 07:00:00"), (1, "2026-02-04 23:59:59")]),
-        _streak_dataset("month, year and leap-day boundaries",
-                        [(1, "2025-12-30 22:00:00"), (1, "2025-12-31 23:59:59"), (1, "2026-01-01 00:00:00"),
-                         (1, "2026-01-02 01:00:00"), (2, "2024-02-28 10:00:00"), (2, "2024-02-29 10:00:00"),
-                         (2, "2024-03-01 10:00:00"), (3, "2026-02-28 10:00:00"), (3, "2026-03-01 10:00:00"),
-                         (4, "2026-04-30 23:59:59"), (4, "2026-05-01 00:00:00"), (2, "2024-03-03 10:00:00")]),
-        _streak_dataset("equal streaks: most recent wins",
-                        [(1, "2026-01-01 10:00:00"), (1, "2026-01-02 10:00:00"), (1, "2026-01-05 10:00:00"),
-                         (1, "2026-01-06 10:00:00"), (1, "2026-01-09 10:00:00"), (2, "2026-03-10 10:00:00"),
-                         (2, "2026-03-12 10:00:00"), (2, "2026-03-14 10:00:00"), (3, "2026-01-01 10:00:00"),
-                         (3, "2026-01-02 10:00:00")]),
-        _streak_dataset("unordered rows, single logins, order by user",
-                        [(9, "2026-06-03 10:00:00"), (4, "2026-06-01 10:00:00"), (7, "2026-06-02 10:00:00"),
-                         (9, "2026-06-01 10:00:00"), (9, "2026-06-02 10:00:00"), (12, "2026-06-09 10:00:00"),
-                         (4, "2026-06-02 01:00:00"), (4, "2026-06-03 02:00:00")]),
-        _streak_dataset("random 1", _streak_random(2101, 12, 25)),
-        _streak_dataset("random 2", _streak_random(2102, 40, 60)),
-        _streak_dataset("random 3", _streak_random(2103, 90, 120)),
+        _streak_dataset("one streak per user", [(1, 10), (1, 11), (1, 12), (2, 20), (2, 21), (3, 5)]),
+        _streak_dataset("several streaks per user", [(1, 10), (1, 11), (1, 12), (1, 16), (2, 20),
+                                                     (2, 24), (2, 25), (2, 26), (2, 27), (2, 30),
+                                                     (2, 31), (3, 7), (3, 9)]),
+        _streak_dataset("rows in any order", [(9, 103), (4, 101), (7, 102), (9, 101), (9, 102),
+                                              (9, 104), (12, 109), (4, 102), (9, 99), (7, 101),
+                                              (7, 100), (7, 103), (7, 104)]),
+        _streak_dataset("equal streaks: most recent wins", [(1, 1), (1, 2), (1, 5), (1, 6), (1, 9),
+                                                            (2, 10), (2, 12), (2, 14), (3, 1),
+                                                            (3, 2), (3, 3)]),
+        _streak_dataset("ordered by length, then user", [(5, 1), (5, 2), (3, 4), (3, 5), (8, 7),
+                                                         (2, 1), (2, 2), (2, 3), (1, 9), (4, 30),
+                                                         (4, 31)]),
+        _streak_dataset("several logins per day", [(1, 40), (1, 40), (1, 41), (1, 41), (1, 41),
+                                                   (2, 40), (2, 40), (2, 40), (1, 43), (3, 50),
+                                                   (3, 51), (3, 51), (3, 52)]),
+        _streak_dataset("random, one login per day", _streak_random(2101, 30, 40, repeats=1)),
+        _streak_dataset("random 1", _streak_random(2102, 40, 60)),
+        _streak_dataset("random 2", _streak_random(2103, 90, 120)),
     ]
     return grade_query(answer, datasets)
 
@@ -4898,6 +4905,12 @@ def grade_sql(t, answer_sql, scale):
     return {"compiled": True, "compile_log": "", "warnings": 0, "sanitizers": False, "tests": results}
 
 
+def request_failed(rec):
+    """True when a stored record holds no real answer (request error or broken stream)."""
+    gen = rec.get("gen") or {}
+    return bool(gen.get("error")) or gen.get("finish") is None
+
+
 def score_of(tests):
     total = sum(x["weight"] for x in tests)
     got = sum(x["weight"] for x in tests if x["passed"])
@@ -5377,7 +5390,9 @@ def main(argv=None):
         try:
             with open(os.path.join(run_dir, "results.json"), encoding="utf-8") as f:
                 old = json.load(f)
-            results = old["results"]
+            # A request that failed says nothing about the model: ask again.
+            results = [r for r in old["results"] if not request_failed(r)]
+            retried = len(old["results"]) - len(results)
             name = old["meta"]["name"]
             date = old["meta"]["date"]
         except Exception as e:
@@ -5389,6 +5404,8 @@ def main(argv=None):
                   "scores from different versions must not be mixed in one run."
                   % (run_dir, old_version, VERSION))
             return 2
+        if retried:
+            print("Resuming: %d answer(s) lost to request errors will be asked again." % retried)
     else:
         date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         run_dir = os.path.join(args.out, slugify(name),
@@ -5446,7 +5463,8 @@ def main(argv=None):
                 if gen["reasoning"]:
                     f.write("## Reasoning\n\n%s\n\n" % gen["reasoning"])
                 f.write("## Answer\n\n%s\n" % gen["content"])
-            res = grade_answer(t, gen["content"], tc, args.time_scale,
+            # A fragment left by a failed request is not an answer: it scores 0 until asked again.
+            res = grade_answer(t, "" if gen["error"] else gen["content"], tc, args.time_scale,
                                keep_dir=(stem + "_build") if args.keep_work and t["lang"] != "sql" else None)
             ext = {"python": "py", "c": "c", "cpp": "cpp", "csharp": "cs", "php": "php", "java": "java",
                    "sql": "sql"}[t["lang"]]
@@ -5483,6 +5501,10 @@ def main(argv=None):
         return 130
 
     agg = save(partial=len(results) < len(plan))
+    lost = sum(1 for r in results if request_failed(r))
+    if lost:
+        print("\nWARNING: %d request(s) failed and count as 0. Ask them again with:\n"
+              "  python3 %s --resume %s" % (lost, sys.argv[0], run_dir))
     print("\n" + "=" * 64)
     print("FINAL SCORE: %.1f / 100   (%s)" % (agg["final"], name))
     if agg["stdev"] is not None:
