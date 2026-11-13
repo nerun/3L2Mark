@@ -60,7 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 6"
+VERSION = "1.0 Beta 7"
+# Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
+# weights are the same as in this version, so their scores can be mixed and compared.
+COMPAT = [6, 7]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5052,6 +5055,7 @@ def aggregate(results, tasks):
             groups.setdefault(keyfn(r), []).append(r["score"])
         return [(labels.get(k, k) if labels else k, 100.0 * sum(v) / len(v), len(v)) for k, v in groups.items()]
 
+    tps_mean, tps_stdev = tps_stats(results)
     return {
         "final": final, "per_run": per_run,
         "stdev": statistics.pstdev(per_run) if len(per_run) > 1 else None,
@@ -5062,10 +5066,28 @@ def aggregate(results, tasks):
         "compile_rate": 100.0 * sum(r["compiled"] for r in task_rows) / len(task_rows) if task_rows else 0.0,
         "gen_seconds": sum(r["gen"]["seconds"] for r in results),
         "tokens": sum((r["gen"]["completion_tokens"] or 0) for r in results),
-        "tps": statistics.mean([r["gen"]["tps"] for r in results if r["gen"]["tps"]] or [0]),
+        "tps": tps_mean, "tps_stdev": tps_stdev,
         "truncated": sum(1 for r in results if r["gen"]["finish"] in CUT_OFF),
         "gen_errors": sum(1 for r in results if r["gen"]["error"]),
     }
+
+
+def tps_stats(results):
+    """Mean and standard deviation of the generation speed over all answers."""
+    v = [r["gen"]["tps"] for r in results if r["gen"]["tps"]]
+    if not v:
+        return 0.0, None
+    return statistics.mean(v), (statistics.pstdev(v) if len(v) > 1 else None)
+
+
+def fmt_tps(mean, stdev):
+    return "%.1f" % mean + ("" if stdev is None else " ±%.1f" % stdev)
+
+
+def version_group(version):
+    """Versions listed in COMPAT share one group; any other version is a group of its own."""
+    m = re.match(r"1\.0 Beta (\d+)$", version or "")
+    return "compat" if m and int(m.group(1)) in COMPAT else version
 
 
 def fmt_secs(s):
@@ -5159,7 +5181,8 @@ def write_report(path, meta, results, tasks):
     add("| Failed requests | %d |" % agg["gen_errors"])
     add("| Total generation time | %s |" % fmt_secs(agg["gen_seconds"]))
     add("| Total generated tokens | %d |" % agg["tokens"])
-    add("| Average speed | %.1f tok/s |" % agg["tps"])
+    add("| Average speed (± standard deviation over the answers) | %s tok/s |"
+        % fmt_tps(agg["tps"], agg["tps_stdev"]))
     add("")
 
     add("## Failed tests")
@@ -5249,15 +5272,16 @@ def compare(out_dir, show_all=False):
         flags = ""
         if meta.get("partial") or meta.get("skipped_langs"):
             flags = " (incomplete)"
-        L.append("| %d | %s%s | %s | %s | %s | %d/%d | %.0f%% | %.1f | %s | %d | %s | %s |" % (
+        L.append("| %d | %s%s | %s | %s | %s | %d/%d | %.0f%% | %s | %s | %d | %s | %s |" % (
             i, meta["name"], flags, score,
             " | ".join("-" if cat[k] is None else "%.1f" % cat[k] for k in cats),
             " | ".join("-" if l not in lang else "%.1f" % lang[l] for l in langs),
-            agg["perfect"], len(agg["tasks"]), agg["compile_rate"], agg["tps"],
+            agg["perfect"], len(agg["tasks"]), agg["compile_rate"],
+            fmt_tps(agg["tps"], agg["tps_stdev"]),
             fmt_secs(agg["gen_seconds"]), meta["runs"], meta["date"][:10],
             meta.get("version", "unknown")))
     versions = sorted(set(meta.get("version", "unknown") for meta, _ in rows))
-    if len(versions) > 1:
+    if len(set(version_group(v) for v in versions)) > 1:
         L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
                   "or limits may differ between versions, so the scores are not directly comparable.**"
                   % ", ".join(versions)]
@@ -5399,7 +5423,7 @@ def main(argv=None):
             print("Cannot resume from %s: %s" % (run_dir, e))
             return 2
         old_version = old["meta"].get("version", "unknown")
-        if old_version != VERSION:
+        if version_group(old_version) != version_group(VERSION):
             print("Cannot resume from %s: it was created by codebench %s and this is %s; "
                   "scores from different versions must not be mixed in one run."
                   % (run_dir, old_version, VERSION))
