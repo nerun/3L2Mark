@@ -6,6 +6,7 @@ This benchmark was created because I wanted to evaluate which variant of the Qwe
 
 - MiMo-V2.6-Distill-Qwen-9B
 - Ornith-1.5-9B
+- OxCoder-9B
 - PentaCoder-9B
 - Qwen3.5-9B (itself)
 - Qwen3.8-9B-Distill
