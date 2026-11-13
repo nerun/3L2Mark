@@ -111,6 +111,8 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 
 **Changing tasks, tests, prompts or weights changes what a score means.** Bump `VERSION` whenever you do. The version is stored in `results.json` (`meta.version`) and shown in `report.md`; `--compare` lists it per model and warns when versions differ, and `--resume` refuses a run created by another version.
 
+**`COMPAT` lists the Beta numbers whose scores are interchangeable with the current version.** A change that leaves tasks, tests, prompts and weights alone (reporting, `--compare`, bug fixes outside grading) still bumps `VERSION`, and the new number is appended to `COMPAT`. A change that alters what a score means resets `COMPAT` to the new number alone. Versions inside `COMPAT` do not trigger the `--compare` warning and can be resumed (`version_group`).
+
 ## Results format
 
 `results/<model>/<timestamp>/` holds `results.json` (meta + per task-run records), `report.md`, and `answers/<task>_run<k>.md|.<ext>` (prompt, reasoning, answer, extracted code). `--compare` and `--resume` read `results.json`; keep it backward compatible or bump `VERSION`.
