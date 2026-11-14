@@ -29,3 +29,27 @@ sudo apt update && sudo apt install -y default-jdk-headless dotnet10 gcc g++ mon
 ```
 
 SQL uses Python's built-in `sqlite3` (needs SQLite >= 3.35).
+
+## Usage
+
+Start a [`llama-server`](https://llama.app/), then run:
+
+```sh
+python3 codebench.py --help
+```
+
+I'll just make one observation that the help doesn't detail: if you're running more than one execution (`--runs`), and need to interrupt (<kbd>Ctrl</kbd>+<kbd>c</kbd>), when you resume later, you should also enter the total number of runs you were executing:
+
+```sh
+python3 codebench.py --runs 3 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
+```
+
+When finished, use:
+
+```sh
+python3 codebench.py --compare
+```
+
+All models tested within the `results/` folder will be compared and ranked. The comparison report will be located in `results/comparison.md`.
+
+The report calculates the average and standard deviation of each run for each model tested. Therefore, to maintain consistency in your tests, run the same number of times (`--runs`) for each model you are testing.
