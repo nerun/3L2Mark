@@ -16,7 +16,7 @@ This benchmark was created because I wanted to evaluate which variant of the Qwe
 | Qwopus3.5-9B-Coder | Optimized for agentic coding, tool calling, and logical reasoning |
 | Qwythos-9B-v2 | Uncensored 3.5 trained by Claude Mythos/Fable |
 | Swift-1.5-Ornith-9B | Derived from Ornith, efficient reasoning, -33% thinking tokens |
-| Triumvirate | Merges Qwopus Coder, MiMo, and Ornith |
+| Triumvirate-9B | Merges Qwopus Coder, MiMo, and Ornith |
 
 For that, I asked Claude Fable 5.2 to create it... Yes, I know. But what could be better than an AI to test its little brethren?
 
