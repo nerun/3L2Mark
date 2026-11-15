@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 7"
+VERSION = "1.0 Beta 8"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [6, 7]
+COMPAT = [6, 7, 8]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5285,8 +5285,10 @@ def compare(out_dir, show_all=False):
         L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
                   "or limits may differ between versions, so the scores are not directly comparable.**"
                   % ", ".join(versions)]
+    # Columns are headed by the rank number of the table above: model names are too wide.
     L += ["", "## Score per task", "",
-          "| Task | " + " | ".join(meta["name"] for meta, _ in rows) + " |",
+          "Columns are the rank numbers (#) of the table above.", "",
+          "| Task | " + " | ".join("%d" % i for i in range(1, len(rows) + 1)) + " |",
           "|---|" + "---:|" * len(rows)]
     for t in TASKS:
         cells = []
@@ -5295,7 +5297,7 @@ def compare(out_dir, show_all=False):
             cells.append("%.0f" % (100 * hit[0]["score"]) if hit else "-")
         L.append("| %s | %s |" % (t["id"], " | ".join(cells)))
     L += ["", "With one run per task, differences of a few points between two models are within "
-              "sampling noise; use --runs 3 (or more) and compare the mean and the standard deviation.", ""]
+              "sampling noise; use `--runs 3` (or more) and compare the mean and the standard deviation.", ""]
     text = "\n".join(L)
     path = os.path.join(out_dir, "comparison.md")
     with open(path, "w", encoding="utf-8") as f:
