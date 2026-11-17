@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 8"
+VERSION = "1.0 Beta 9"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [6, 7, 8]
+COMPAT = [6, 7, 8, 9]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5220,6 +5220,20 @@ def write_report(path, meta, results, tasks):
     return agg
 
 
+def cutoff_stats(results):
+    """Extra figures for --compare: cut-off answers by reason, and the `stop` answers alone."""
+    kinds = {k: sum(1 for r in results if r["gen"]["finish"] == k) for k in CUT_OFF}
+    done = [r for r in results if r["gen"]["finish"] == "stop"]
+    return {
+        "total": len(results),
+        "cut": sum(kinds.values()),
+        "kinds": kinds,
+        "stop_n": len(done),
+        "stop_score": 100 * sum(r["score"] for r in done) / len(done) if done else None,
+        "stop_tokens": statistics.median(r["gen"]["completion_tokens"] for r in done) if done else None,
+    }
+
+
 def compare(out_dir, show_all=False):
     """Build a ranking from every results.json found under out_dir."""
     found = []
@@ -5240,7 +5254,7 @@ def compare(out_dir, show_all=False):
             latest[d["meta"]["name"]] = d
         found = list(latest.values())
     by_id = {t["id"]: t for t in TASKS}
-    rows = []
+    rows, extras = [], []
     for d in found:
         tasks = [by_id[r["task"]] for r in d["results"] if r["task"] in by_id]
         seen, ordered = set(), []
@@ -5249,7 +5263,10 @@ def compare(out_dir, show_all=False):
                 seen.add(t["id"])
                 ordered.append(t)
         rows.append((d["meta"], aggregate(d["results"], ordered)))
-    rows.sort(key=lambda r: -r[1]["final"])
+        extras.append(cutoff_stats(d["results"]))
+    order = sorted(range(len(rows)), key=lambda i: -rows[i][1]["final"])
+    rows = [rows[i] for i in order]
+    extras = [extras[i] for i in order]
     cats = ["write", "bugfix", "optimize", "sql"]
     langs = ["Python", "C/C++", "C#", "PHP", "Java", "SQL"]
     L = ["# Model comparison", "",
@@ -5285,9 +5302,24 @@ def compare(out_dir, show_all=False):
         L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
                   "or limits may differ between versions, so the scores are not directly comparable.**"
                   % ", ".join(versions)]
-    # Columns are headed by the rank number of the table above: model names are too wide.
+    L += ["", "## Cut-offs and finished answers", "",
+          "| # | Model | Score | Cut off (`loop` + `length`) | Score of `stop` answers only "
+          "| Median tokens of `stop` answers |",
+          "|---:|---|---:|---|---:|---:|"]
+    for i, ((meta, agg), ex) in enumerate(zip(rows, extras), 1):
+        score = "%.1f" % agg["final"]
+        if agg["stdev"] is not None:
+            score += " ±%.1f" % agg["stdev"]
+        kinds = ", ".join("%d `%s`" % (n, k) for k, n in ex["kinds"].items() if n)
+        cut = "%d of %d%s" % (ex["cut"], ex["total"], " (%s)" % kinds if kinds else "")
+        L.append("| %d | %s | %s | %s | %s | %s |" % (
+            i, meta["name"], score, cut,
+            "-" if ex["stop_score"] is None else "%.1f (n=%d)" % (ex["stop_score"], ex["stop_n"]),
+            "-" if ex["stop_tokens"] is None else "%.0f" % ex["stop_tokens"]))
+    L += ["", "> (n=) is the number of `stop` answers (finished, not cut off) used for that score."]
+    # Columns are headed by the rank number of the main table: model names are too wide.
     L += ["", "## Score per task", "",
-          "Columns are the rank numbers (#) of the table above.", "",
+          "Columns are the rank numbers (#) of the main table.", "",
           "| Task | " + " | ".join("%d" % i for i in range(1, len(rows) + 1)) + " |",
           "|---|" + "---:|" * len(rows)]
     for t in TASKS:
@@ -5296,8 +5328,9 @@ def compare(out_dir, show_all=False):
             hit = [r for r in agg["tasks"] if r["id"] == t["id"]]
             cells.append("%.0f" % (100 * hit[0]["score"]) if hit else "-")
         L.append("| %s | %s |" % (t["id"], " | ".join(cells)))
-    L += ["", "With one run per task, differences of a few points between two models are within "
-              "sampling noise; use `--runs 3` (or more) and compare the mean and the standard deviation.", ""]
+    L += ["", "> [!note]",
+          "> With one run per task, differences of a few points between two models are within "
+          "sampling noise; use `--runs 5` (or more) and compare the mean and the standard deviation.", ""]
     text = "\n".join(L)
     path = os.path.join(out_dir, "comparison.md")
     with open(path, "w", encoding="utf-8") as f:
