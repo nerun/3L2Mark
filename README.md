@@ -44,6 +44,14 @@ I'll just make one observation that the help doesn't detail: if you're running m
 python3 codebench.py --runs 3 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
 ```
 
+To redo a single answer (for example, one slowed down by something on your machine), list the stored records of a run, remove the one you want by its number, and resume with the same options as the original run:
+
+```sh
+python3 codebench.py --records results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
+python3 codebench.py --records results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS> --remove 77
+python3 codebench.py --runs 5 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
+```
+
 When finished, use:
 
 ```sh

@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 9"
+VERSION = "1.0 Beta 10"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [6, 7, 8, 9]
+COMPAT = [6, 7, 8, 9, 10]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5369,10 +5369,49 @@ def parse_args(argv):
     p.add_argument("--skip-missing", action="store_true", help="skip languages whose toolchain is missing instead of aborting")
     p.add_argument("--keep-work", action="store_true", help="keep the build folder of every answer inside the results folder")
     p.add_argument("--resume", metavar="DIR", help="continue an interrupted run stored in DIR")
+    p.add_argument("--records", metavar="DIR",
+                   help="list the stored records of the run in DIR, one line each, and exit")
+    p.add_argument("--remove", type=int, metavar="N",
+                   help="with --records: delete record number N (as listed) so that --resume asks it again")
     p.add_argument("--selftest", action="store_true", help="validate toolchains and tasks with the reference solutions (no model)")
     p.add_argument("--compare", action="store_true", help="rank all models found in the results folder and exit")
     p.add_argument("--compare-all", action="store_true", help="like --compare but lists every stored run")
     return p.parse_args(argv)
+
+
+def records_cmd(run_dir, remove):
+    """List the records of a stored run, or delete one so that --resume asks it again."""
+    path = os.path.join(run_dir.rstrip("/"), "results.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print("Cannot read %s: %s" % (path, e))
+        return 2
+    recs = data["results"]
+    if remove is not None:
+        if not 1 <= remove <= len(recs):
+            print("No record number %d (the run has %d)." % (remove, len(recs)))
+            return 2
+        gone = recs.pop(remove - 1)
+        shutil.copyfile(path, path + ".bak")
+        data["meta"]["partial"] = True
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        print("Removed record %d: %s run %d (backup: %s.bak)." % (remove, gone["task"], gone["run"], path))
+        print("Ask it again with:  python3 %s --resume %s --runs %s  (same options as the original run)"
+              % (sys.argv[0], run_dir.rstrip("/"), data["meta"].get("runs", 1)))
+        return 0
+    m = data["meta"]
+    print("%s   %s   %s   %d record(s)\n" % (m.get("name"), m.get("date"), m.get("version"), len(recs)))
+    for i, r in enumerate(recs, 1):
+        g = r.get("gen") or {}
+        note = "  REQUEST FAILED" if request_failed(r) else ""
+        print("%3d  %-26s run %-2d %6.1f%%  %2d/%-2d tests  gen %s, %s tok, %.1f tok/s  %s%s" % (
+            i, r["task"], r["run"], 100 * r["score"], r["passed"], r["total"],
+            fmt_secs(g.get("seconds") or 0), g.get("completion_tokens", 0), g.get("tps") or 0,
+            g.get("finish"), note))
+    return 0
 
 
 def select_tasks(only):
@@ -5386,6 +5425,11 @@ def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if args.compare or args.compare_all:
         return compare(args.out, args.compare_all)
+    if args.remove is not None and not args.records:
+        print("--remove needs --records DIR")
+        return 2
+    if args.records:
+        return records_cmd(args.records, args.remove)
 
     tasks = select_tasks(args.only)
     if args.list:
