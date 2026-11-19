@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 10"
+VERSION = "1.0 Beta 11"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [6, 7, 8, 9, 10]
+COMPAT = [6, 7, 8, 9, 10, 11]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5305,7 +5305,7 @@ def compare(out_dir, show_all=False):
     L += ["", "## Cut-offs and finished answers", "",
           "| # | Model | Score | Cut off (`loop` + `length`) | Score of `stop` answers only "
           "| Median tokens of `stop` answers |",
-          "|---:|---|---:|---|---:|---:|"]
+          "|:---:|---|---:|---|---:|---:|"]
     for i, ((meta, agg), ex) in enumerate(zip(rows, extras), 1):
         score = "%.1f" % agg["final"]
         if agg["stdev"] is not None:
