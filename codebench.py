@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 11"
+VERSION = "1.0 Beta 12"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [6, 7, 8, 9, 10, 11]
+COMPAT = [6, 7, 8, 9, 10, 11, 12]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5268,7 +5268,8 @@ def compare(out_dir, show_all=False):
     rows = [rows[i] for i in order]
     extras = [extras[i] for i in order]
     cats = ["write", "bugfix", "optimize", "sql"]
-    langs = ["Python", "C/C++", "C#", "PHP", "Java", "SQL"]
+    # SQL is both a category and a language with the same tasks: show it once (category).
+    langs = ["Python", "C/C++", "C#", "PHP", "Java"]
     L = ["# Model comparison", "",
          "Generated %s from %d result set(s)%s." % (
              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), len(rows),
