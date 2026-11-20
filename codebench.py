@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 14"
+VERSION = "1.0 Beta 15"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [13, 14]
+COMPAT = [13, 14, 15]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5399,6 +5399,8 @@ def compare(out_dir, show_all=False):
             fmt_tps(agg["tps"], agg["tps_stdev"]),
             fmt_secs(agg["gen_seconds"]), meta["runs"], meta["date"][:10],
             meta.get("version", "unknown")))
+    total_gen = sum(agg["gen_seconds"] for _, agg in rows)
+    L += ["", "Total test time (sum of all Gen time): %s (%.1f hours)." % (fmt_secs(total_gen), total_gen / 3600.0)]
     versions = sorted(set(meta.get("version", "unknown") for meta, _ in rows))
     if len(set(version_group(v) for v in versions)) > 1:
         L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
