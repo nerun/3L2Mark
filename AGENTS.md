@@ -48,7 +48,7 @@ Toolchains on Debian: `sudo apt install default-jdk-headless dotnet10 gcc g++ mo
 3. **Bugfix tasks**: `*_GIVEN` (buggy program), `*_FIXES` (list of `(old, new)` replacements), `ref_*`, tests.
 4. **Optimize tasks**: `*_GIVEN` (slow program), `*_FAST` (reference), tests with timed tiers.
 5. **SQL tasks**: helpers (`sql_statements`, `run_steps`, `grade_behaviour`, `grade_query`) and six tasks with custom `grade` functions.
-6. **Main**: prompts, `grade_program`, `grade_answer`, `selftest`, `write_report`, `compare`, `main`.
+6. **Main**: prompts, `grade_program`, `grade_answer`, `selftest`, `write_report`, the Markdown-to-HTML converter (`md_to_html`, `comparison_html`: standard library only, favicon embedded in base64), `compare` (writes `comparison.md` and `comparison.html`), `main`.
 
 ## Task model
 

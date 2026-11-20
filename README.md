@@ -58,6 +58,6 @@ When finished, use:
 python3 codebench.py --compare
 ```
 
-All models tested within the `results/` folder will be compared and ranked. The comparison report will be located in `results/comparison.md`.
+All models tested within the `results/` folder will be compared and ranked. The comparison report will be located in `results/comparison.md`, together with a formatted, self-contained copy in `results/comparison.html`.
 
 The report calculates the average and standard deviation of each run for each model tested. Therefore, to maintain consistency in your tests, run the same number of times (`--runs`) for each model you are testing.
