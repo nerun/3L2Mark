@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 13"
+VERSION = "1.0 Beta 14"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [13]
+COMPAT = [13, 14]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -674,7 +674,8 @@ class Server:
                 elapsed = time.monotonic() - t0
                 if progress:
                     progress(res["chunks"], elapsed)
-                if elapsed > wall_limit:
+                if elapsed > wall_limit and res["finish"] is None:
+                    # A finished answer is not cut off: keep reading the usage chunk and [DONE].
                     res["finish"] = "wall-limit"
                     break
                 if looping and res["finish"] is None:
@@ -733,7 +734,68 @@ class Server:
 # Code extraction from a chat answer
 # --------------------------------------------------------------------------
 
-_FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+#.\-]*)[^\n]*\n(.*?)(?:\n[ \t]*```|\Z)", re.S)
+# A fence is a line that starts with three backticks; an inline ``` inside a sentence is not.
+_FENCE_LINE = re.compile(r"[ \t]*```+[ \t]*([A-Za-z0-9_+#.\-]*)(.*)")
+# A line of English prose: a capitalised word (not an all-caps SQL keyword) and three or more
+# further words, without the characters that most code lines contain.
+_PROSE_LINE = re.compile(r"(?:[-*]\s+|\d+[.)]\s+|\*\*)?[A-Z][a-z]\S*(?:\s+\S+){3,}")
+_CODE_CHARS = re.compile(r"[;{}=]")
+
+
+def _fence(line):
+    """(tag, bare) if the line is a code fence, else None. A bare fence has no info string."""
+    m = _FENCE_LINE.fullmatch(line)
+    if not m:
+        return None
+    return m.group(1).lower(), not m.group(1) and not m.group(2).strip()
+
+
+def _pair_fences(lines):
+    """Split lines into fenced blocks. Returns (blocks, open_tail): blocks is a list of
+    (tag, body, closed); open_tail is True when the last block runs to the end of the text.
+    A fence with an info string inside an open block closes it and opens a new one: models
+    never put "```python" inside a code block, but they do forget a closing fence."""
+    blocks, tag, start = [], None, None
+    for i, line in enumerate(lines):
+        f = _fence(line)
+        if f is None:
+            continue
+        if start is None:
+            tag, start = f[0], i + 1
+        elif f[1]:
+            blocks.append((tag, "\n".join(lines[start:i]), True))
+            start = None
+        else:
+            blocks.append((tag, "\n".join(lines[start:i]), True))
+            tag, start = f[0], i + 1
+    if start is not None:
+        blocks.append((tag, "\n".join(lines[start:]), False))
+    return blocks, start is not None
+
+
+# A short introduction such as "Here is the program:".
+_INTRO_LINE = re.compile(r"[A-Z][a-z][^;{}=()]*:")
+
+
+def _is_prose(line):
+    line = line.strip()
+    return bool(_PROSE_LINE.fullmatch(line)) and not _CODE_CHARS.search(line)
+
+
+def _code_likeness(text):
+    """Lines that do not read as prose minus lines that do (blank lines do not count)."""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    prose = sum(1 for ln in lines if _is_prose(ln))
+    return len(lines) - 2 * prose
+
+
+def _drop_intro(lines):
+    """Remove the prose lines that introduce code written without its opening fence."""
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or _is_prose(lines[i])
+                              or _INTRO_LINE.fullmatch(lines[i].strip())):
+        i += 1
+    return lines[i:]
 
 
 def extract_code(answer, lang):
@@ -741,25 +803,36 @@ def extract_code(answer, lang):
 
     Rule: among fenced blocks tagged with the expected language take the longest; if there
     is none, the longest fenced block; if there is no fence at all, the whole answer.
+    A missing fence must not cost points, because a person reading the answer would not be
+    stopped by it: a block left open runs to the end of the answer, and when the opening
+    fence is missing (code first, then a lone closing fence) the text before that fence is
+    taken as a block (without introductory prose lines), if it reads more like code than the
+    text the fence would otherwise open.
     Returns (code, how).
     """
     text = answer
     if "</think>" in text:
         text = text.rsplit("</think>", 1)[1]
-    blocks = [(m.group(1).lower(), m.group(2)) for m in _FENCE_RE.finditer(text)]
-    blocks = [(tag, body) for tag, body in blocks if body.strip()]
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks, open_tail = _pair_fences(lines)
+    first = next((i for i, ln in enumerate(lines) if _fence(ln)), None)
+    if open_tail and _fence(lines[first])[1]:
+        # The first fence may be the closing fence of a block whose opening fence is missing.
+        pre = "\n".join(_drop_intro(lines[:first]))
+        if _code_likeness(pre) > _code_likeness(blocks[-1][1]):
+            rest, _ = _pair_fences(lines[first + 1:])
+            blocks = [("", pre, "stray")] + rest
+    blocks = [b for b in blocks if b[1].strip()]
     if not blocks:
-        # Tolerate a stray fence line (e.g. the opening fence was never written).
-        lines = text.strip().split("\n")
-        if lines and re.fullmatch(r"[ \t]*```[ \t]*[A-Za-z0-9_+#.\-]*[ \t]*", lines[-1]):
-            lines.pop()
-        if lines and re.fullmatch(r"[ \t]*```[ \t]*[A-Za-z0-9_+#.\-]*[ \t]*", lines[0]):
-            lines.pop(0)
-        return "\n".join(lines).strip() + "\n", "no code fence (whole answer used)"
+        return text.strip() + "\n", "no code fence (whole answer used)"
     tagged = [b for b in blocks if b[0] in LANG_FENCES[lang]]
     pool = tagged or blocks
-    code = max(pool, key=lambda b: len(b[1]))[1]
+    tag, code, closed = max(pool, key=lambda b: len(b[1]))
     how = "fenced block" if tagged else "fenced block (language tag missing or different)"
+    if closed == "stray":
+        how = "code before a lone closing fence (opening fence missing)"
+    elif not closed:
+        how += " (closing fence missing)"
     if len(pool) > 1:
         how += ", longest of %d" % len(pool)
     return code.strip("\n") + "\n", how
@@ -4961,11 +5034,32 @@ def task_reference(t):
     return sol() if callable(sol) else sol
 
 
+def selftest_extraction():
+    """extract_code on answers with missing, stray or unusual fences. Returns failing case names."""
+    f = "```"
+    code = "import sys\nn = int(sys.stdin.readline())\nfor i in range(n):\n    print(i)\n"
+    prose = "This solution reads the input and prints each number.\n"
+    cases = [
+        ("both fences", "Here is the solution.\n\n%spython\n%s%s\nDone.\n" % (f, code, f)),
+        ("no fence", code),
+        ("closing fence missing", "Here it is:\n%spython\n%s" % (f, code)),
+        ("opening fence missing", code + f + "\n"),
+        ("opening fence missing, prose after", "Here is the solution:\n\n" + code + f + "\n" + prose),
+        ("opening fence missing, block after", code + f + "\nExample:\n%s\n3 4\n%s\n" % (f, f)),
+        ("CRLF, closing fence missing", (f + "python\n" + code).replace("\n", "\r\n")),
+        ("backticks inside a sentence", "Use %s fences.\n%spython\n%s%s\n" % (f, f, code, f)),
+        ("first block never closed", "%spython\nx = 1\n%spython\n%s%s\n" % (f, f, code, f)),
+    ]
+    return [name for name, answer in cases if extract_code(answer, "python")[0] != code]
+
+
 def selftest(tasks, tc, scale):
     print("Self-test: every reference solution must score 100%; every original (buggy/slow) program "
           "must score low.\n")
+    bad = selftest_extraction()
+    print("Code extraction: %s\n" % ("FAILED (%s)" % ", ".join(bad) if bad else "ok"))
     print("%-22s %-7s %10s %10s  %s" % ("task", "lang", "reference", "original", "notes"))
-    ok_all = True
+    ok_all = not bad
     for t in tasks:
         lang = t["lang"]
         if not tc[lang]["ok"]:
@@ -5049,8 +5143,9 @@ def aggregate(results, tasks):
         })
     runs = sorted(set(r["run"] for r in results))
     per_run = []
+    ids = set(r["id"] for r in task_rows)  # stored records of removed tasks do not count
     for k in runs:
-        sc = [r["score"] for r in results if r["run"] == k]
+        sc = [r["score"] for r in results if r["run"] == k and r["task"] in ids]
         if len(sc) == len(task_rows):
             per_run.append(100.0 * sum(sc) / len(sc))
     final = 100.0 * sum(r["score"] for r in task_rows) / len(task_rows) if task_rows else 0.0
@@ -5310,7 +5405,7 @@ def compare(out_dir, show_all=False):
                   "or limits may differ between versions, so the scores are not directly comparable.**"
                   % ", ".join(versions)]
     L += ["", "## Cut-offs and finished answers", "",
-          "| # | Model | Score | Cut off (`loop` + `length`) | Score of `stop` answers only "
+          "| # | Model | Score | Cut off (%s) | Score of `stop` answers only " % " + ".join("`%s`" % k for k in CUT_OFF) +
           "| Median tokens of `stop` answers |",
           "|:---:|---|---:|---|---:|---:|"]
     for i, ((meta, agg), ex) in enumerate(zip(rows, extras), 1):
