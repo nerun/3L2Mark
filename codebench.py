@@ -60,10 +60,10 @@ import urllib.parse
 import zlib
 from fractions import Fraction
 
-VERSION = "1.0 Beta 12"
+VERSION = "1.0 Beta 13"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [6, 7, 8, 9, 10, 11, 12]
+COMPAT = [13]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -749,7 +749,13 @@ def extract_code(answer, lang):
     blocks = [(m.group(1).lower(), m.group(2)) for m in _FENCE_RE.finditer(text)]
     blocks = [(tag, body) for tag, body in blocks if body.strip()]
     if not blocks:
-        return text.strip() + "\n", "no code fence (whole answer used)"
+        # Tolerate a stray fence line (e.g. the opening fence was never written).
+        lines = text.strip().split("\n")
+        if lines and re.fullmatch(r"[ \t]*```[ \t]*[A-Za-z0-9_+#.\-]*[ \t]*", lines[-1]):
+            lines.pop()
+        if lines and re.fullmatch(r"[ \t]*```[ \t]*[A-Za-z0-9_+#.\-]*[ \t]*", lines[0]):
+            lines.pop(0)
+        return "\n".join(lines).strip() + "\n", "no code fence (whole answer used)"
     tagged = [b for b in blocks if b[0] in LANG_FENCES[lang]]
     pool = tagged or blocks
     code = max(pool, key=lambda b: len(b[1]))[1]
