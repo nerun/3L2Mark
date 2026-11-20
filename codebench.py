@@ -59,11 +59,12 @@ import time
 import urllib.parse
 import zlib
 from fractions import Fraction
+from html import escape as html_escape
 
-VERSION = "1.0 Beta 15"
+VERSION = "1.0 Beta 16"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [13, 14, 15]
+COMPAT = [13, 14, 15, 16]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5335,6 +5336,331 @@ def cutoff_stats(results):
     }
 
 
+# ==========================================================================
+# HTML report (comparison.html)
+# ==========================================================================
+
+# favicon.png (32x32), embedded so that the HTML page is a single self-contained file.
+FAVICON_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAACXBIWXMAAAsTAAALEwEAmpwYAAAA"
+    "AXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAMAUExURUdwTKamppWVlYKCgpGRkYaGhouLi4uL"
+    "i3d3d2pqanp6enV1dVRUVElJSHFxcXJyclpaWl1dXX5+fnt7e1VVVZKSkoODg4GBgXt7e4eHh4CA"
+    "gH19fX9/f2NjY1lZWUtLS3Nzc4GBgYGBgVVVVXh4eGhoaGhoaGNjY4qKioWFhX19fVpaWmdnZ1dX"
+    "V2xsbG9vb3x8fHl5eY6OjpGRkXBwcH19fXh4eE1NTX5+fnNzc1RUVFFRUWNjY0ZGRlRUVFNTU2Zm"
+    "ZnBwcGdnZ3FxcXNzc3R0dHp6en19fVlZWf763P352/z42vj01/v32vn12Pr22Xt7e9HOtfHu0vTw"
+    "1OzpzX59fP353E5OTWdnZkxMS9bTunV1dOThxnp6eV5eW1lZV1NTUcfDre/rz+PfxGpqZ9/bwfby"
+    "1trYvkdHRrq3o4+OhND/OoeGf5iWhlNTU7e1oc/Msz09PczJsqOgjufjx/v/OvXx1Pfz1razn42L"
+    "f7+8purmy+5QK25uboaEeOznvtDSsunjtq/0RrP/ONjavpX/N+nlycnTspWUidLSp9jVu3zWanr/"
+    "Nlr+NcnGr19eV4F/c7Gum6SiknFvZHh3bujkyXx8d+v/OubiyN3av/v2OuLewmRkYtG9qtnWvGBg"
+    "XldXVNPQtygoKPnjN4mIeIqJgMC9p8nHsPRTGuXixjEwLnJxbPRfG1hYU1JRTrWynJqYifNsHfDt"
+    "0YSEfejny8z7PqPHkpHnV621nuT8Pa/LnILbYpflWWfjVJPVdPX8PtvdwWb/Nej/OsnRoInTeIjS"
+    "eGjuTHXXZm7fXWTqUF30Q2r9ObXRnmtqYjo6NZWTgby5pp6dj4KAcc3Wc05NRcl7bvzxN/BgJm9u"
+    "YFxFM5V6TM2/h/rXMfzrNtJ0ZY5MG5iDVN63SPBrHN1tG/bNM6xyVe7tTcqgj8K/qa5bGtapS/ve"
+    "M9PPrZ6cjfTAM3RKLEpJQD09Na+tm4puTOpzHfPGOtJ0ZL+YXMhpG4JVOtPCrdC7p/363O9ZKcOC"
+    "dcubgTseQssAAABJdFJOUwABA5sTAy4v/vzhLuH+Lv6bixPxyhmLzPxd6+v8i8rxOxMD8S/8m5s7"
+    "Gcrr6/zrzF3KGQPri5vrA/HM6138/OHMXcxdm5sZGZshmOtmAAAC6ElEQVQ4y2NggAEmUUlmcSkZ"
+    "GSlxZklRJgZ0wMTOLC0REBAKBAEBEtLM7GhKWMSEYwNyLub3BQb2ZU5aGhArLMaCJM3IpsURm1UV"
+    "k+btBQTe5VMTO2I5tNgY4fIaXByhFdW+nnDgnVS1mYNLA6aCjSs6p8DHEwX4R2VFc7FB7TeMzuny"
+    "RZX3DM5MzYo2BLuDyZR/WiCSfJiXl6fnn771vumb+U1BfmG35M+Hmu/lH9LS0NnZ+SYqtW52mG9i"
+    "tCU7A4OxWW1lCFinz4Ez+/Y0bd25f9bir99//v9VHbSh1syYwcik9oU3UD6t/cix0z2tzdmHSme9"
+    "fvf5x8a//9ICV5sYMRhwTmvz9PRtOXqqt/cgSMH00mt3Xr3/sqbmt9empZwGDC4Rb308g3ftPXni"
+    "eHf37u1NQAV3n9x6uXHFt02evp8iXBn0IzK9vXdsa4/Z5OPvX7Yl/fDlZ4sf3ny8pmaul6dXUYo+"
+    "g15EkZennzfcl17lM28/uP9oxb1NQM7MFD0GzogotDDynBH+9DrIAE/PmBROBtU5XWjyXhNvxDy/"
+    "ugmsNEWVQWd+IJqCpP71Xj5TQQZ4zp6jw+AQt8wLotELasCFKyUwduB8Jwa1+GJ/sHhjPTSazp73"
+    "a6wHq/CuiFdjcNSdkgRWkNoGiavEc4Fes0vA7LJKXWcGTe34Ai8kFwZPmRwM48ycr63JwKqekAUX"
+    "8fRb3pEwEaberzhPnZWBQUV5QSIsnMKK4vLycv2ghkXFKasA0wOrbPjkZKgm7+LCwsL+TRBOyIRw"
+    "WVZQklKUC6+rhnq1atWiRZcgyWdTbricIiRRcvNELlkJUZG+6uOSZLDSkNxwHm5Yslew510NTtZe"
+    "yz5UgF3g3zUhkkcBkTH4RHgTNqSneXmWzUsCRejsSfG8ItyMSHlLSFA+I6GuYuHKkJCSqMzKBRny"
+    "gkKomVOJT8DcNiNy3dq16yIzbM0F+JQw8reFm42HlbWdnbWVgI27BVwYALcjQMmwuPZcAAAAAElF"
+    "TkSuQmCC"
+)
+
+# GitHub callouts: "> [!NOTE]" (also TIP, IMPORTANT, WARNING, CAUTION): (label, 16x16 icon path).
+CALLOUTS = {
+    "NOTE": ("Note", "M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"),
+    "TIP": ("Tip", "M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"),
+    "IMPORTANT": ("Important", "M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"),
+    "WARNING": ("Warning", "M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"),
+    "CAUTION": ("Caution", "M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"),
+}
+CALLOUT_MARKER = re.compile(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", re.I)
+HTML_NUM = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:\u00b1.*)?$")
+
+HTML_CSS = """
+:root{
+  --bg:#f6f5f1; --surface:#ffffff; --ink:#1d2330; --muted:#667085;
+  --line:#e4e2da; --head:#1f2a44; --head-ink:#f4f1e8; --accent:#2f6f5e;
+  --heat:47,111,94; --gold:#b8892b; --silver:#8a93a3; --bronze:#a8683a;
+  --zebra:rgba(31,42,68,.025); --shadow:0 1px 2px rgba(20,26,40,.06),0 8px 28px rgba(20,26,40,.06);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#12151c; --surface:#1a1f2a; --ink:#e8e6df; --muted:#98a1b3;
+    --line:#2b3242; --head:#0e1118; --head-ink:#e8e6df; --accent:#6fc2a8;
+    --heat:111,194,168; --zebra:rgba(255,255,255,.02);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 28px rgba(0,0,0,.35);
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; padding:56px clamp(16px,4vw,56px) 80px; background:var(--bg); color:var(--ink);
+  font:15px/1.6 "Inter","Segoe UI",system-ui,-apple-system,Roboto,"Helvetica Neue",sans-serif;
+  font-feature-settings:"tnum" 1,"cv11" 1;
+}
+.page{max-width:1480px; margin:0 auto}
+h1{
+  font:600 clamp(28px,4vw,40px)/1.15 "Iowan Old Style","Palatino Linotype",Georgia,serif;
+  letter-spacing:-.015em; margin:0 0 6px;
+}
+h1::after{content:""; display:block; width:56px; height:3px; margin-top:14px; background:var(--accent); border-radius:2px}
+h2{
+  font:600 22px/1.25 "Iowan Old Style","Palatino Linotype",Georgia,serif;
+  letter-spacing:-.01em; margin:56px 0 6px;
+}
+h1 + p{color:var(--muted); margin:14px 0 28px}
+p{margin:.4em 0 1em}
+p + .table-wrap, h2 + p + .table-wrap{margin-top:14px}
+code{
+  font:12.5px ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  background:rgba(127,127,127,.14); padding:1px 6px; border-radius:5px;
+}
+blockquote{
+  margin:14px 0 0; padding:10px 16px; border-left:3px solid var(--accent);
+  background:var(--surface); border-radius:0 8px 8px 0; color:var(--muted); font-size:13.5px;
+}
+blockquote p{margin:0}
+
+.callout{
+  --c:var(--accent); margin:18px 0; padding:12px 18px 12px 16px; border-left:4px solid var(--c);
+  background:color-mix(in srgb,var(--c) 8%,var(--surface)); border-radius:0 10px 10px 0;
+  color:var(--ink); font-size:14.5px;
+}
+.callout p{margin:.35em 0}
+.callout-title{
+  display:flex; align-items:center; gap:8px; margin:0 0 4px !important; color:var(--c);
+  font-weight:600; font-size:13px; letter-spacing:.02em;
+}
+.callout.note{--c:#2f6fd0} .callout.tip{--c:#2f8f5b} .callout.important{--c:#8250df}
+.callout.warning{--c:#b7791f} .callout.caution{--c:#d1383d}
+@media (prefers-color-scheme:dark){
+  .callout.note{--c:#6ea8ff} .callout.tip{--c:#56d391} .callout.important{--c:#b392f0}
+  .callout.warning{--c:#e3b341} .callout.caution{--c:#ff7b72}
+}
+.table-wrap{
+  overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+  border-radius:14px; box-shadow:var(--shadow);
+}
+table{border-collapse:separate; border-spacing:0; width:100%; font-size:13.5px; table-layout:auto}
+th,td{padding:9px 12px; white-space:nowrap; border-bottom:1px solid var(--line)}
+thead th{
+  position:sticky; top:0; z-index:2; background:var(--head); color:var(--head-ink);
+  font-weight:600; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase;
+  padding:13px 12px; border-bottom:0;
+}
+thead th:first-child{border-top-left-radius:13px}
+thead th:last-child{border-top-right-radius:13px}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:nth-child(even) td{background-color:var(--zebra)}
+tbody tr{transition:background .15s}
+tbody tr:hover td{background-color:rgba(var(--heat),.09)}
+td[style*="center"],th[style*="center"]{text-align:center}
+td{font-variant-numeric:tabular-nums}
+
+td.rank{color:var(--muted); font-weight:600; width:1%}
+td.model{
+  font-weight:600; max-width:420px; overflow:hidden; text-overflow:ellipsis;
+  font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace; font-size:12.5px;
+}
+table.tasks td.task{
+  font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace; font-size:12.5px;
+  font-weight:500; position:sticky; left:0; background:var(--surface); z-index:1;
+  border-right:1px solid var(--line);
+}
+table.tasks tbody tr:nth-child(even) td.task{background:var(--surface)}
+table.tasks thead th:first-child{position:sticky; left:0; z-index:3}
+
+td.heat{
+  background-image:linear-gradient(rgba(var(--heat),calc(var(--h)*.42)),rgba(var(--heat),calc(var(--h)*.42)));
+}
+tbody tr:hover td.heat{background-color:transparent}
+
+tr.podium td.rank{color:var(--ink)}
+tr.p1 td.rank{box-shadow:inset 3px 0 0 var(--gold); color:var(--gold)}
+tr.p2 td.rank{box-shadow:inset 3px 0 0 var(--silver); color:var(--silver)}
+tr.p3 td.rank{box-shadow:inset 3px 0 0 var(--bronze); color:var(--bronze)}
+table.ranking td:nth-child(3){font-weight:700}
+
+@media (max-width:640px){
+  body{padding-top:32px}
+  th,td{padding:8px 9px}
+}
+@page{size:A4 landscape; margin:12mm}
+@media print{
+  body{background:#fff; color:#000; padding:0; font-size:11px}
+  .table-wrap{box-shadow:none; overflow:visible; break-inside:avoid}
+  table{font-size:9px}
+  th,td{padding:4px 5px}
+  thead th{position:static; background:#222; -webkit-print-color-adjust:exact; print-color-adjust:exact}
+  td.heat{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+  h2{break-after:avoid}
+}
+"""
+
+
+def md_inline(text):
+    """Escape text and render the only inline Markdown that comparison.md uses."""
+    text = html_escape(text, quote=False)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+
+
+def _table_cells(line):
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _heat(pct):
+    """Tint of a cell, proportional to a 0-100 value (driven by a CSS variable)."""
+    return "--h:%.3f;" % max(0.0, min(1.0, pct / 100.0))
+
+
+def md_table_to_html(block, index):
+    """Render one pipe table. Tables 0, 1 and 2 of the comparison get their own styling."""
+    head = _table_cells(block[0])
+    aligns = []
+    for c in _table_cells(block[1]):
+        left, right = c.startswith(":"), c.endswith(":")
+        aligns.append("center" if left and right else "right" if right else "left" if left else "")
+    kind = {0: "ranking", 1: "cutoffs", 2: "tasks"}.get(index)
+
+    def cell(tag, text, col, cls=None, extra=""):
+        attrs = ""
+        if cls:
+            attrs += ' class="%s"' % cls
+        style = ("text-align:%s;" % aligns[col] if col < len(aligns) and aligns[col] else "") + extra
+        if style:
+            attrs += ' style="%s"' % style
+        return "<%s%s>%s</%s>" % (tag, attrs, md_inline(text), tag)
+
+    out = ['<div class="table-wrap">', '<table%s>' % (' class="%s"' % kind if kind else ""),
+           "<thead>", "<tr>" + "".join(cell("th", c, i) for i, c in enumerate(head)) + "</tr>",
+           "</thead>", "<tbody>"]
+    for line in block[2:]:
+        cells = _table_cells(line)
+        tr_cls = ""
+        parts = []
+        for i, text in enumerate(cells):
+            cls, extra = None, ""
+            if kind == "ranking" and len(cells) >= 12:
+                cls = "rank" if i == 0 else "model" if i == 1 else None
+            elif kind == "cutoffs":
+                cls = "rank" if i == 0 else "model" if i == 1 else None
+            elif kind == "tasks":
+                cls = "task" if i == 0 else None
+            heated = (kind == "ranking" and len(cells) >= 12 and 2 <= i < 12) or (kind == "tasks" and i > 0)
+            m = HTML_NUM.match(text) if heated else None
+            if m:
+                cls = "heat"
+                extra = _heat(float(m.group(1)))
+            parts.append(cell("td", text, i, cls, extra))
+        if kind == "ranking" and len(cells) >= 12 and cells[0] in ("1", "2", "3"):
+            tr_cls = ' class="podium p%s"' % cells[0]
+        out.append("<tr%s>%s</tr>" % (tr_cls, "".join(parts)))
+    out += ["</tbody>", "</table>", "</div>"]
+    return "\n".join(out)
+
+
+def md_quote_to_html(lines):
+    """Render a blockquote; a first line [!NOTE] (and the like) makes it a callout."""
+    paras, cur = [], []
+    for line in lines + [""]:
+        if line.strip():
+            cur.append(line.strip())
+        elif cur:
+            paras.append(cur)
+            cur = []
+    kind = None
+    if paras:
+        m = CALLOUT_MARKER.match(paras[0][0])
+        if m:
+            kind = m.group(1).upper()
+            paras[0] = paras[0][1:]
+            if not paras[0]:
+                paras.pop(0)
+    body = "".join("<p>%s</p>" % md_inline(" ".join(p)) for p in paras)
+    if kind is None:
+        return "<blockquote>%s</blockquote>" % body
+    label, path = CALLOUTS[kind]
+    title = ('<p class="callout-title"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">'
+             '<path fill="currentColor" d="%s"/></svg>%s</p>' % (path, label))
+    return '<blockquote class="callout %s">%s%s</blockquote>' % (kind.lower(), title, body)
+
+
+def md_to_html(md):
+    """Convert comparison.md (headings, paragraphs, pipe tables, blockquotes) to an HTML fragment."""
+    lines = md.splitlines()
+    out, i, tables = [], 0, 0
+
+    def starts_block(s):
+        return s.startswith(("|", ">", "#"))
+
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+        elif line.startswith("|"):
+            j = i
+            while j < len(lines) and lines[j].startswith("|"):
+                j += 1
+            out.append(md_table_to_html(lines[i:j], tables))
+            tables += 1
+            i = j
+        elif line.startswith(">"):
+            j = i
+            while j < len(lines) and lines[j].startswith(">"):
+                j += 1
+            out.append(md_quote_to_html([re.sub(r"^>\s?", "", s) for s in lines[i:j]]))
+            i = j
+        elif line.startswith("#"):
+            m = re.match(r"^(#{1,6})\s+(.*)$", line)
+            level = len(m.group(1)) if m else 1
+            out.append("<h%d>%s</h%d>" % (level, md_inline(m.group(2) if m else line), level))
+            i += 1
+        else:
+            j = i
+            while j < len(lines) and lines[j].strip() and not starts_block(lines[j]):
+                j += 1
+            out.append("<p>%s</p>" % md_inline(" ".join(s.strip() for s in lines[i:j])))
+            i = j
+    return "\n".join(out)
+
+
+def comparison_html(md):
+    """Wrap comparison.md in a self-contained, styled HTML page (heat-map cells, callouts, favicon)."""
+    m = re.search(r"^# (.+)$", md, re.M)
+    title = html_escape(m.group(1) if m else "Model comparison", quote=False)
+    icon = "data:image/png;base64," + FAVICON_PNG_B64
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="author" content="3L2Mark">
+<meta name="copyright" content="&copy; 2026 Daniel Dias Rodrigues">
+<link rel="icon" type="image/png" href="%s">
+<title>%s</title>
+<style>%s</style>
+</head>
+<body>
+<main class="page">
+%s
+</main>
+</body>
+</html>
+""" % (icon, title, HTML_CSS, md_to_html(md))
+
+
 def compare(out_dir, show_all=False):
     """Build a ranking from every results.json found under out_dir."""
     found = []
@@ -5420,7 +5746,8 @@ def compare(out_dir, show_all=False):
             i, meta["name"], score, cut,
             "-" if ex["stop_score"] is None else "%.1f (n=%d)" % (ex["stop_score"], ex["stop_n"]),
             "-" if ex["stop_tokens"] is None else "%.0f" % ex["stop_tokens"]))
-    L += ["", "> (n=) is the number of `stop` answers (finished, not cut off) used for that score."]
+    L += ["", "> [!note]",
+          "> (n=) is the number of `stop` answers (finished, not cut off) used for that score."]
     # Columns are headed by the rank number of the main table: model names are too wide.
     L += ["", "## Score per task", "",
           "Columns are the rank numbers (#) of the main table.", "",
@@ -5439,8 +5766,11 @@ def compare(out_dir, show_all=False):
     path = os.path.join(out_dir, "comparison.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+    html_path = os.path.join(out_dir, "comparison.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(comparison_html(text))
     print(text)
-    print("Saved to %s" % path)
+    print("Saved to %s and %s" % (path, html_path))
     return 0
 
 
