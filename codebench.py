@@ -61,10 +61,10 @@ import zlib
 from fractions import Fraction
 from html import escape as html_escape
 
-VERSION = "1.0 Beta 16"
+VERSION = "1.0 Beta 17"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [13, 14, 15, 16]
+COMPAT = [13, 14, 15, 16, 17]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5727,6 +5727,12 @@ def compare(out_dir, show_all=False):
             meta.get("version", "unknown")))
     total_gen = sum(agg["gen_seconds"] for _, agg in rows)
     L += ["", "Total test time (sum of all Gen time): %s (%.1f hours)." % (fmt_secs(total_gen), total_gen / 3600.0)]
+    L += ["", "> [!note]",
+          "> **Solved**: how many tasks the model got completely right in every run (the model always gets that task right, in each run).",
+          ">",
+          "> **Builds**: percentage of all answers (tasks x runs) that compiled, or were accepted by the "
+          "interpreter, on the first attempt, before any test ran. It does not say the code is correct: "
+          "a high Builds with a low Score means the code builds but its logic is wrong."]
     versions = sorted(set(meta.get("version", "unknown") for meta, _ in rows))
     if len(set(version_group(v) for v in versions)) > 1:
         L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
