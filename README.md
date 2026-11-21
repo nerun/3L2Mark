@@ -20,6 +20,13 @@ This benchmark was created because I wanted to evaluate which variant of the Qwe
 
 For that, I asked Claude Fable 5.2 to create it... Yes, I know. But what could be better than an AI to test its little brethren?
 
+## Requirements
+
+- Linux only (the script uses `resource` and `/proc`).
+- Python 3, standard library only, nothing to install with `pip`. This script was tested with Python 3.14.
+- [llama.cpp](https://llama.app/) v1.0.0 or later, serving the model through its OpenAI-compatible API.
+- The toolchains below. A missing toolchain only skips the tasks of that language, and the report marks the run as incomplete.
+
 ## Install dependencies
 
 Toolchains on Debian:
@@ -27,6 +34,8 @@ Toolchains on Debian:
 ```bash
 sudo apt update && sudo apt install -y default-jdk-headless dotnet10 gcc g++ mono-mcs php-cli
 ```
+
+C and C++ answers are tested on an AddressSanitizer + UndefinedBehaviorSanitizer build. On Debian, `gcc` and `g++` already pull in `libasan` and `libubsan`; on other distributions install the sanitizer runtimes separately if your compiler package does not include them.
 
 SQL uses Python's built-in `sqlite3` (needs SQLite >= 3.35).
 
@@ -38,11 +47,25 @@ Start a [`llama-server`](https://llama.app/), then run:
 python3 codebench.py --help
 ```
 
-I'll just make one observation that the help doesn't detail: if you're running more than one execution (`--runs`), and need to interrupt (<kbd>Ctrl</kbd>+<kbd>c</kbd>), when you resume later, you should also enter the total number of runs you were executing:
+By default the script talks to `http://127.0.0.1:9931`, so start the server on port 9931 (`--port 9931`). To use another host or port, pass `--url`:
+
+```sh
+python3 codebench.py --url http://127.0.0.1:8080
+```
+
+If you're running more than one execution (`--runs`), and need to interrupt (<kbd>Ctrl</kbd>+<kbd>c</kbd>), when you resume later, you should also enter the total number of runs you were executing:
 
 ```sh
 python3 codebench.py --runs 3 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
 ```
+
+To add more runs to a finished battery (for example, you ran `--runs 5` and now want 10), do not start a new run: `--compare` only reads the most recent result folder of each model, so a new folder would replace the old one in the report instead of adding to it. Resume the old folder and raise `--runs` to the new total. Only the missing runs (6 to 10) are asked, with new seeds, and the report then evaluates all 10:
+
+```sh
+python3 codebench.py --runs 10 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
+```
+
+Use the same server setup (model, quantization, `-ctk`/`-ctv`, context) and the same `--max-tokens` as in the first runs, because `--resume` uses the options of the current command line.
 
 To redo a single answer (for example, one slowed down by something on your machine), list the stored records of a run, remove the one you want by its number, and resume with the same options as the original run:
 
