@@ -61,10 +61,10 @@ import zlib
 from fractions import Fraction
 from html import escape as html_escape
 
-VERSION = "1.0 Beta 19"
+VERSION = "1.0 Beta 20"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [18, 19]
+COMPAT = [18, 19, 20]
 # --migrate: runs made by these Beta versions can be brought to this version, because only the
 # tasks in MIGRATE_REDO changed since then. Their records are dropped and --resume asks them again.
 MIGRATE_FROM = [13, 14, 15, 16, 17]
@@ -5561,7 +5561,7 @@ def md_to_html(md):
 def comparison_html(md):
     """Wrap comparison.md in a self-contained, styled HTML page (heat-map cells, callouts, favicon)."""
     m = re.search(r"^# (.+)$", md, re.M)
-    title = html_escape(m.group(1) if m else "Model comparison", quote=False)
+    title = html_escape(m.group(1) if m else "3L2Mark Report", quote=False)
     icon = "data:image/png;base64," + FAVICON_PNG_B64
     return """<!DOCTYPE html>
 <html lang="en">
@@ -5621,7 +5621,7 @@ def compare(out_dir, show_all=False):
     cats = ["write", "bugfix", "optimize", "sql"]
     # SQL is both a category and a language with the same tasks: show it once (category).
     langs = ["Python", "C/C++", "C#", "PHP", "Java"]
-    L = ["# Model comparison", "",
+    L = ["# 3L2Mark Report — Model comparison results", "",
          "Generated %s from %d result set(s)%s." % (
              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), len(rows),
              "" if show_all else " (latest run of each model)"), "",
