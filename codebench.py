@@ -40,6 +40,7 @@ your user privileges).
 """
 
 import argparse
+import bisect
 import ctypes
 import datetime
 import http.client
@@ -1274,7 +1275,7 @@ task(id="cpp_write_orderbook", lang="cpp", category="write",
 
 # ---- C#: spreadsheet evaluator --------------------------------------------
 
-SHEET_SPEC = r"""Write a small spreadsheet evaluator.
+SHEET_SPEC = r"""Complete a small spreadsheet evaluator. The program below already reads the input, splits expressions into tokens, sorts the cells and prints the output; only the method Value is missing. Implement Value. You may add fields and helper methods, but keep the input reading and the output as they are.
 
 INPUT
 Line 1: N (1 <= N <= 3000). Next N lines: one assignment each, written CELL=EXPRESSION without spaces (for example  B2=A1+7-C3 ). A cell name is one column letter A-Z followed by a row number 1-99 (no leading zeros). EXPRESSION is one or more terms separated by '+' or '-'; a term is a cell name or a non-negative decimal integer of at most 9 digits. A later assignment to the same cell replaces the earlier one.
@@ -1425,43 +1426,38 @@ def sheet_tests():
     return tests
 
 
-SHEET_SOLUTION = r'''using System;
+SHEET_GIVEN = r'''using System;
 using System.Collections.Generic;
 using System.Text;
 
 class Program {
+    // Expression of every assigned cell; a later assignment replaced the earlier one.
     static Dictionary<string, string> cells = new Dictionary<string, string>();
-    static Dictionary<string, long> memo = new Dictionary<string, long>();
-    static HashSet<string> busy = new HashSet<string>();
-    const long CYC = long.MinValue;
 
-    static long Get(string name) {
-        long v;
-        if (memo.TryGetValue(name, out v)) return v;
-        string src;
-        if (!cells.TryGetValue(name, out src)) return 0;
-        if (busy.Contains(name)) return CYC;
-        busy.Add(name);
-        v = Eval(src);
-        busy.Remove(name);
-        memo[name] = v;
-        return v;
+    // Value returns CYCLE for a #CYCLE! cell (no real value is this small).
+    const long CYCLE = long.MinValue;
+
+    // Splits an expression into terms and operators: "A1+7-B2" -> "A1", "+", "7", "-", "B2".
+    static List<string> Tokens(string expr) {
+        var tokens = new List<string>();
+        int p = 0;
+        while (p < expr.Length) {
+            if (expr[p] == '+' || expr[p] == '-') {
+                tokens.Add(expr[p].ToString());
+                p++;
+                continue;
+            }
+            int start = p++;
+            while (p < expr.Length && char.IsDigit(expr[p])) p++;
+            tokens.Add(expr.Substring(start, p - start));
+        }
+        return tokens;
     }
 
-    static long Eval(string s) {
-        long total = 0, sign = 1;
-        bool cyc = false;
-        int p = 0;
-        while (p < s.Length) {
-            char c = s[p];
-            if (c == '+' || c == '-') { sign = c == '+' ? 1 : -1; p++; continue; }
-            int start = p++;
-            while (p < s.Length && char.IsDigit(s[p])) p++;
-            string tok = s.Substring(start, p - start);
-            long v = char.IsLetter(c) ? Get(tok) : long.Parse(tok);
-            if (v == CYC) cyc = true; else total += sign * v;
-        }
-        return cyc ? CYC : total;
+    // The value of the cell called name, or CYCLE.
+    static long Value(string name) {
+        // TODO
+        return 0;
     }
 
     static void Main() {
@@ -1476,17 +1472,51 @@ class Program {
                                           : int.Parse(x.Substring(1)).CompareTo(int.Parse(y.Substring(1))));
         var sb = new StringBuilder();
         foreach (string name in names) {
-            long v = Get(name);
-            sb.Append(name).Append('=').Append(v == CYC ? "#CYCLE!" : v.ToString()).Append('\n');
+            long v = Value(name);
+            sb.Append(name).Append('=').Append(v == CYCLE ? "#CYCLE!" : v.ToString()).Append('\n');
         }
         Console.Write(sb.ToString());
     }
 }
 '''
 
+SHEET_SOLUTION = SHEET_GIVEN.replace('''    // The value of the cell called name, or CYCLE.
+    static long Value(string name) {
+        // TODO
+        return 0;
+    }
+''', '''    static Dictionary<string, long> memo = new Dictionary<string, long>();
+    static HashSet<string> busy = new HashSet<string>();
+
+    // The value of the cell called name, or CYCLE.
+    static long Value(string name) {
+        long v;
+        if (memo.TryGetValue(name, out v)) return v;
+        string src;
+        if (!cells.TryGetValue(name, out src)) return 0;
+        if (busy.Contains(name)) return CYCLE;
+        busy.Add(name);
+        long total = 0, sign = 1;
+        bool cyc = false;
+        foreach (string tok in Tokens(src)) {
+            if (tok == "+") sign = 1;
+            else if (tok == "-") sign = -1;
+            else {
+                long t = char.IsLetter(tok[0]) ? Value(tok) : long.Parse(tok);
+                if (t == CYCLE) cyc = true; else total += sign * t;
+            }
+        }
+        busy.Remove(name);
+        v = cyc ? CYCLE : total;
+        memo[name] = v;
+        return v;
+    }
+''')
+assert SHEET_SOLUTION != SHEET_GIVEN
+
 task(id="cs_write_sheet", lang="csharp", category="write",
      title="Spreadsheet evaluator with references and cycles",
-     spec=SHEET_SPEC, tests=sheet_tests, solution=SHEET_SOLUTION)
+     spec=SHEET_SPEC, given=SHEET_GIVEN, tests=sheet_tests, solution=SHEET_SOLUTION)
 
 
 # ---- PHP: RFC 4180 CSV aggregation ----------------------------------------
@@ -2900,8 +2930,8 @@ task(id="java_bugfix_sensors", lang="java", category="bugfix",
 
 # ---- Python: submatrices with a given sum ---------------------------------
 
-SUBSUM_SPEC = r"""Input: line 1 holds r, c and k (1 <= r, c <= 3000, r <= 25 or c <= 25, |k| <= 10^9). Then r lines of c integers each: the rows of a matrix A (|A[i][j]| <= 1000).
-Output: the number of submatrices of A whose elements sum to exactly k. A submatrix is a non-empty block of consecutive rows and consecutive columns."""
+SUBSUM_SPEC = r"""Input: line 1 holds r, c and k (1 <= r, c <= 3000, r <= 20 or c <= 20, |k| <= 10^9). Then r lines of c integers each: the rows of a matrix A (|A[i][j]| <= 1000).
+Output: the number of submatrices of A whose elements sum to at most k (sum <= k). A submatrix is a non-empty block of consecutive rows and consecutive columns."""
 
 SUBSUM_GIVEN = r'''import sys
 
@@ -2923,7 +2953,7 @@ def main():
                     for i in range(r1, r2 + 1):
                         for j in range(c1, c2 + 1):
                             s += a[i][j]
-                    if s == k:
+                    if s <= k:
                         count += 1
     print(count)
 
@@ -2932,6 +2962,7 @@ main()
 '''
 
 SUBSUM_FAST = r'''import sys
+from bisect import bisect_left, insort
 from itertools import accumulate
 
 
@@ -2948,11 +2979,11 @@ def main():
         col = [0] * c
         for bottom in range(top, r):
             col = [x + y for x, y in zip(col, rows[bottom])]
-            seen = {0: 1}
-            get = seen.get
+            # Sorted prefix sums seen so far: the block (p, s] qualifies when p >= s - k.
+            seen = [0]
             for s in accumulate(col):
-                count += get(s - k, 0)
-                seen[s] = get(s, 0) + 1
+                count += len(seen) - bisect_left(seen, s - k)
+                insort(seen, s)
     print(count)
 
 
@@ -2968,12 +2999,12 @@ def ref_subsum(k, rows):
         col = [0] * len(rows[0])
         for row in rows[top:]:
             col = [x + y for x, y in zip(col, row)]
-            seen = {0: 1}
+            seen = [0]
             s = 0
             for x in col:
                 s += x
-                count += seen.get(s - k, 0)
-                seen[s] = seen.get(s, 0) + 1
+                count += len(seen) - bisect.bisect_left(seen, s - k)
+                bisect.insort(seen, s)
     return "%d\n" % count
 
 
@@ -2984,7 +3015,7 @@ def _subsum_case(name, k, rows, **kw):
 
 
 def _subsum_matrix(r, c, m, salt):
-    """Small values in [-m//2, m//2] from a closed form, so that many submatrices match."""
+    """Small values in [-m//2, m//2] from a closed form, so that many sums tie with k."""
     return [[(i * i * 31 + j * j * 7 + i * j * 13 + j * 5 + i * 3 + salt) % m - m // 2
              for j in range(c)] for i in range(r)]
 
@@ -3001,22 +3032,25 @@ def subsum_tests():
         _subsum_case("single cell", -5, [[-5]], weight=0.5),
         _subsum_case("single row", 3, rand(1, 60, -4, 4), weight=0.5),
         _subsum_case("single column", -2, rand(60, 1, -4, 4), weight=0.5),
-        _subsum_case("no match", 10 ** 9, rand(9, 11, -1000, 1000), weight=0.5),
+        _subsum_case("every submatrix qualifies", 10 ** 9, rand(9, 11, -1000, 1000), weight=0.5),
+        _subsum_case("no submatrix qualifies", -10 ** 9, rand(9, 11, -1000, 1000), weight=0.5),
         _subsum_case("more rows than columns", 6, rand(14, 5, -5, 5), weight=0.5),
     ]
-    # Tier 1 rejects only the given program. Tiers 2 and 3 need O(min(r,c)^2 * max(r,c)):
-    # pairing the rows (or the columns) in both orientations takes about 30 s on one of them.
-    tests.append(_subsum_case("tier 1: 25 x 150", 3, _subsum_matrix(25, 150, 7, 1),
+    # Tier 1 rejects only the given program (the 2D prefix-sum O(r^2 c^2) passes it). Tiers 2
+    # and 3 need sorted prefix sums per pair of rows on the short side, O(min^2 max log max):
+    # the reference takes 0.25 s, Fenwick and merge-sort versions 0.5-0.9 s; pairing the rows of
+    # the tall matrix without transposing takes about 15 s.
+    tests.append(_subsum_case("tier 1: 20 x 150", 3, _subsum_matrix(20, 150, 7, 1),
                               limit=3.0, weight=2.0, timed=True))
-    tests.append(_subsum_case("tier 2: 25 x 3000 (wide)", 7, _subsum_matrix(25, 3000, 9, 2),
+    tests.append(_subsum_case("tier 2: 20 x 3000 (wide)", 7, _subsum_matrix(20, 3000, 9, 2),
                               limit=3.0, weight=3.0, timed=True))
-    tests.append(_subsum_case("tier 3: 3000 x 25 (tall)", -4, _subsum_matrix(3000, 25, 9, 3),
+    tests.append(_subsum_case("tier 3: 3000 x 20 (tall)", -4, _subsum_matrix(3000, 20, 9, 3),
                               limit=3.0, weight=3.0, timed=True))
     return tests
 
 
 task(id="py_opt_subsum", lang="python", category="optimize",
-     title="Count submatrices with a given sum",
+     title="Count submatrices with sum at most k",
      spec=SUBSUM_SPEC, given=SUBSUM_GIVEN, solution=SUBSUM_FAST, tests=subsum_tests)
 
 
@@ -4812,6 +4846,9 @@ def build_prompt(t, tc):
     lang = t["lang"]
     tail = "%s\n%s" % (lang_requirements(lang, tc), RESPONSE_RULES)
     if t["category"] == "write":
+        if "given" in t:
+            return "%s\n\nPROGRAM TO COMPLETE\n```%s\n%s```\n\n%s" % (
+                t["spec"], LANG_FENCES[lang][0], t["given"], tail)
         return "%s\n\n%s" % (t["spec"], tail)
     intro = BUGFIX_INTRO if t["category"] == "bugfix" else OPTIMIZE_INTRO
     return "%s\n\nSPECIFICATION\n%s\n\nPROGRAM\n```%s\n%s```\n\n%s" % (
@@ -5082,6 +5119,8 @@ def aggregate(results, tasks):
         "compile_rate": 100.0 * sum(r["compiled"] for r in task_rows) / len(task_rows) if task_rows else 0.0,
         "gen_seconds": sum(r["gen"]["seconds"] for r in results),
         "tokens": sum((r["gen"]["completion_tokens"] or 0) for r in results),
+        # Mean over every answer, cut off ones included (unlike the `stop`-only median).
+        "avg_tokens": sum((r["gen"]["completion_tokens"] or 0) for r in results) / len(results) if results else 0.0,
         "tps": tps_mean, "tps_stdev": tps_stdev,
         "truncated": sum(1 for r in results if r["gen"]["finish"] in CUT_OFF),
         "gen_errors": sum(1 for r in results if r["gen"]["error"]),
@@ -5626,8 +5665,8 @@ def compare(out_dir, show_all=False):
              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), len(rows),
              "" if show_all else " (latest run of each model)"), "",
          "| # | Model | Score | Write | Bugs | Optimize | SQL | " + " | ".join(langs) +
-         " | Solved | Builds | tok/s | Gen time | Runs | Date | Version |",
-         "|---:|---|---:|---:|---:|---:|---:|" + "---:|" * len(langs) + "---:|---:|---:|---:|---:|---|---|"]
+         " | Solved | Builds | tok/s | Avg tokens | Gen time | Runs | Date | Version |",
+         "|---:|---|---:|---:|---:|---:|---:|" + "---:|" * len(langs) + "---:|---:|---:|---:|---:|---:|---|---|"]
     for i, (meta, agg) in enumerate(rows, 1):
         cat = {k: None for k in cats}
         for label, sc, _ in agg["by_category"]:
@@ -5641,12 +5680,12 @@ def compare(out_dir, show_all=False):
         flags = ""
         if meta.get("partial") or meta.get("skipped_langs"):
             flags = " (incomplete)"
-        L.append("| %d | %s%s | %s | %s | %s | %d/%d | %.0f%% | %s | %s | %d | %s | %s |" % (
+        L.append("| %d | %s%s | %s | %s | %s | %d/%d | %.0f%% | %s | %.0f | %s | %d | %s | %s |" % (
             i, meta["name"], flags, score,
             " | ".join("-" if cat[k] is None else "%.1f" % cat[k] for k in cats),
             " | ".join("-" if l not in lang else "%.1f" % lang[l] for l in langs),
             agg["perfect"], len(agg["tasks"]), agg["compile_rate"],
-            fmt_tps(agg["tps"], agg["tps_stdev"]),
+            fmt_tps(agg["tps"], agg["tps_stdev"]), agg["avg_tokens"],
             fmt_secs(agg["gen_seconds"]), meta["runs"], meta["date"][:10],
             meta.get("version", "unknown")))
     total_gen = sum(agg["gen_seconds"] for _, agg in rows)
@@ -5656,7 +5695,10 @@ def compare(out_dir, show_all=False):
           ">",
           "> **Builds**: percentage of all answers (tasks x runs) that compiled, or were accepted by the "
           "interpreter, on the first attempt, before any test ran. It does not say the code is correct: "
-          "a high Builds with a low Score means the code builds but its logic is wrong."]
+          "a high Builds with a low Score means the code builds but its logic is wrong.",
+          ">",
+          "> **Avg tokens**: mean tokens generated per answer, over all answers, including the cut off "
+          "ones (`length`, `loop`, `wall`). The table below gives the median for `stop` answers only."]
     versions = sorted(set(meta.get("version", "unknown") for meta, _ in rows))
     if len(set(version_group(v) for v in versions)) > 1:
         L += ["", "**Warning: these results come from different benchmark versions (%s). Tasks, tests "
@@ -5802,7 +5844,8 @@ def migrate_cmd(run_dir):
         print("Cannot migrate %s: codebench %s can only migrate runs of Beta %s, and this one "
               "was made by %s." % (run_dir, VERSION, ", ".join(map(str, MIGRATE_FROM)), old_version))
         return 2
-    dest = "%s-beta%d" % (run_dir, beta_number(VERSION))
+    # A copy that was already migrated keeps one suffix: DIR-beta19 becomes DIR-beta20.
+    dest = "%s-beta%d" % (re.sub(r"-beta\d+$", "", run_dir.rstrip("/")), beta_number(VERSION))
     if os.path.exists(dest):
         print("Cannot migrate: %s already exists." % dest)
         return 2

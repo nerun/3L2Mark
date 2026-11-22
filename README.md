@@ -18,7 +18,7 @@ This benchmark was created because I wanted to evaluate which variant of the Qwe
 | Swift-1.5-Ornith-9B | Derived from Ornith, efficient reasoning, -33% thinking tokens |
 | Triumvirate-9B | Merges Qwopus Coder, MiMo, and Ornith |
 
-For that, I asked Claude Fable 5.2 to create it... Yes, I know. But what could be better than an AI to test its little brethren?
+So I asked Claude Fable 5.2 to build it... Yes, I know. But who better than an AI to test its smaller siblings?
 
 ## Requirements
 

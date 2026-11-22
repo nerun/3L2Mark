@@ -61,7 +61,7 @@ A task is a dict registered with `task(...)`:
 | `lang` | `python`, `c`, `cpp`, `csharp`, `php`, `java`, `sql` |
 | `category` | `write`, `bugfix`, `optimize`, `sql` |
 | `spec` | Specification text shown to the model |
-| `given` | Buggy or slow source shown to the model (bugfix, optimize, some SQL) |
+| `given` | Buggy or slow source shown to the model (bugfix, optimize, some SQL), or the skeleton to complete in a write task (`cs_write_sheet`) |
 | `fixes` | `(old, new)` pairs turning `given` into a correct program (self-test only) |
 | `solution` | Reference answer, string or callable (self-test only) |
 | `tests` | Callable returning a list of `T(...)` cases (program tasks) |
@@ -77,7 +77,7 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 ## Invariants (enforced by `--selftest` or by convention)
 
 1. **Every reference scores 100%.** For bugfix tasks the reference is `apply_fixes(given, fixes)`; each anchor must occur exactly once.
-2. **Every `given` program scores below 50%** (currently 9-31%). In bugfix tasks only a few "base" tests may pass on the buggy code; in optimize tasks the small correctness tests weigh 0.5 each so that the unchanged program gets about 25%.
+2. **Every `given` program scores below 50%** (currently 0-33%; the `cs_write_sheet` skeleton scores 0). In bugfix tasks only a few "base" tests may pass on the buggy code; in optimize tasks the small correctness tests weigh 0.5 each so that the unchanged program gets about 25%.
 3. **Time limits are far from both sides.** Reference solutions take well under 1 s against limits of 2-4 s; slow originals do not finish at 5x the limit. Never add a tier where a plausible solution sits near the limit: that turns CPU speed into score noise. Measure before choosing sizes.
 4. **Determinism.** Generate test data only with `Rng` (a fixed LCG) or closed-form arithmetic, never `random`. Results must be identical on every Python version.
 5. **Each bug has isolated tests.** A test should fail because of one bug where possible, so fixing k of n bugs yields proportional credit. When bugs unavoidably interact, order tests from independent to combined.
@@ -123,8 +123,8 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 
 ## Known gaps
 
-- Difficulty is only **roughly calibrated**: against 13 models (Beta 13-17, 5 runs each). Beta 18 replaced `py_opt_subsum` (every model scored 100 with the 1D prefix-sum dictionary) by a 2D version whose tiers separate O(n^4), one orientation of O(n^3) and the transposed O(min^2 max) solution, and cut `cs_write_sheet` (12 of 13 models scored 0, mostly compile errors in a large parser) to `+`/`-` expressions; neither version has been run against a model yet. After real runs, look for tasks where every model scores 0 or 100: they add no discrimination and should be made easier, harder, or replaced.
-- `py_opt_subsum` tiers 2 and 3 are the same idea in both orientations: a solution that always pairs rows (or always columns) passes one and times out on the other (about 30 s against 3.3 s).
+- Difficulty is only **roughly calibrated**: against 13 models (Beta 13-17, 5 runs each) and 4 models on the first Beta 18-20 tasks. Those still gave `py_opt_subsum` 100 and `cs_write_sheet` 0 to almost every run: the 2D "sum = k" count is LeetCode 1074, which every model knows, and 77% of the finished C# spreadsheets did not compile (each model invents its own classes and records), half of the rest broke in the hand-written tokenizer. The corrected Beta 20 asks for "sum <= k" (sorted prefix sums per pair of rows: original 33%, 2D prefix sums 50%, no transposition 75%, sorted list, Fenwick or merge sort 100%) and turns `cs_write_sheet` into completing a given program (I/O, tokenizer, sort and output given; the model writes `Value`: without memoization 93%, without cycle detection or propagation 67%). Neither has been run against a model yet. After real runs, look for tasks where every model scores 0 or 100: they add no discrimination and should be made easier, harder, or replaced.
+- `py_opt_subsum` tiers 2 and 3 are the same idea in both orientations: a solution that always pairs rows (or always columns) passes one and times out on the other (about 15 s against 3.3 s).
 - The reference functions and solutions of `cpp_write_orderbook` and `java_write_rational` still implement features removed from the specs (CANCEL, powers). The tests never use them.
 - Single-shot only: no repair round after a compile error.
 - Model-written code runs with the user's privileges (temporary directory, time and memory limits, no sandbox).
