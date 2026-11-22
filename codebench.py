@@ -61,10 +61,10 @@ import zlib
 from fractions import Fraction
 from html import escape as html_escape
 
-VERSION = "1.0 Beta 17"
+VERSION = "1.0 Beta 18"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [13, 14, 15, 16, 17]
+COMPAT = [18]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -1269,99 +1269,38 @@ task(id="cpp_write_orderbook", lang="cpp", category="write",
 
 
 # ---- C#: spreadsheet evaluator --------------------------------------------
-# The reference and the solution also implement SUM(range) and a #DIV/0! error that the task
-# no longer has.
 
 SHEET_SPEC = r"""Write a small spreadsheet evaluator.
 
 INPUT
-Line 1: N (1 <= N <= 3000). Next N lines: one assignment each, written CELL=EXPRESSION (for example  B2=A1*2+(C7-1) ). A cell name is one column letter A-Z followed by a row number 1-99 (no leading zeros). A later assignment to the same cell replaces the earlier one. Spaces may appear anywhere in a line.
-
-Expression grammar:
-  expr   := term (('+' | '-') term)*
-  term   := factor (('*' | '/') factor)*
-  factor := '-' factor | NUMBER | CELL | '(' expr ')'
-NUMBER is a non-negative decimal integer (at most 10 digits).
+Line 1: N (1 <= N <= 3000). Next N lines: one assignment each, written CELL=EXPRESSION without spaces (for example  B2=A1+7-C3 ). A cell name is one column letter A-Z followed by a row number 1-99 (no leading zeros). EXPRESSION is one or more terms separated by '+' or '-'; a term is a cell name or a non-negative decimal integer of at most 9 digits. A later assignment to the same cell replaces the earlier one.
 
 EVALUATION
-- Values are 64-bit signed integers (no test overflows). '/' is integer division truncated toward zero (-7/2 = -3). No test divides by zero.
+- An expression is evaluated from left to right (10-4-3 is 3) with 64-bit signed integers (no test overflows).
 - A cell may refer to cells assigned later in the input. A cell that was never assigned has the value 0.
 - A cell whose expression depends on itself, directly or through other cells, has the value #CYCLE!. A cell that refers to a #CYCLE! cell is itself #CYCLE!.
 
 OUTPUT
 One line per assigned cell (each cell once), sorted by column letter and then by row NUMBER (A2 comes before A10), in the form CELL=VALUE, where VALUE is the integer or #CYCLE!."""
 
-_SHEET_LIMIT = 1 << 62
+_SHEET_LIMIT = 1 << 60
+_SHEET_CYCLE = "#CYCLE!"
 
 
 class _SheetOverflow(Exception):
     pass
 
 
-def _sheet_parse(src):
-    toks = re.findall(r"\d+|SUM|[A-Z]\d+|[-+*/():]", src.replace(" ", ""))
-    pos = [0]
-
-    def peek():
-        return toks[pos[0]] if pos[0] < len(toks) else None
-
-    def take():
-        pos[0] += 1
-        return toks[pos[0] - 1]
-
-    def expr():
-        node = term()
-        while peek() in ("+", "-"):
-            op = take()
-            node = (op, node, term())
-        return node
-
-    def term():
-        node = factor()
-        while peek() in ("*", "/"):
-            op = take()
-            node = (op, node, factor())
-        return node
-
-    def factor():
-        t = take()
-        if t == "-":
-            return ("neg", factor())
-        if t == "(":
-            node = expr()
-            take()
-            return node
-        if t == "SUM":
-            take()
-            a = take()
-            take()
-            b = take()
-            take()
-            return ("sum", a, b)
-        if t[0].isdigit():
-            return ("num", int(t))
-        return ("cell", t)
-
-    return expr()
-
-
-def ref_sheet(inp):
+def _sheet_values(inp):
+    """Value of every assigned cell: an int or _SHEET_CYCLE."""
     lines = inp.split("\n")
     n = int(lines[0])
     cells = {}
     for ln in lines[1:1 + n]:
         name, _, src = ln.partition("=")
-        cells[name.strip()] = _sheet_parse(src)
+        cells[name] = re.findall(r"[+-]|[A-Z]\d+|\d+", src)
     memo = {}
     busy = set()
-    CYC, DIV = "#CYCLE!", "#DIV/0!"
-
-    def combine(vals):
-        if CYC in vals:
-            return CYC
-        if DIV in vals:
-            return DIV
-        return None
 
     def cell(name):
         if name in memo:
@@ -1369,60 +1308,42 @@ def ref_sheet(inp):
         if name not in cells:
             return 0
         if name in busy:
-            return CYC
+            return _SHEET_CYCLE
         busy.add(name)
         v = ev(cells[name])
         busy.discard(name)
         memo[name] = v
         return v
 
-    def ev(node):
-        kind = node[0]
-        if kind == "num":
-            return node[1]
-        if kind == "cell":
-            return cell(node[1])
-        if kind == "neg":
-            v = ev(node[1])
-            return v if isinstance(v, str) else -v
-        if kind == "sum":
-            c1, r1, c2, r2 = node[1][0], int(node[1][1:]), node[2][0], int(node[2][1:])
-            vals = [cell("%s%d" % (chr(c), r)) for c in range(ord(c1), ord(c2) + 1)
-                    for r in range(r1, r2 + 1)]
-            err = combine(vals)
-            if err:
-                return err
-            res = sum(vals)
-        else:
-            a, b = ev(node[1]), ev(node[2])
-            err = combine([a, b])
-            if err:
-                return err
-            if kind == "+":
-                res = a + b
-            elif kind == "-":
-                res = a - b
-            elif kind == "*":
-                res = a * b
+    def ev(toks):
+        total, sign, cyc = 0, 1, False
+        for t in toks:
+            if t == "+":
+                sign = 1
+            elif t == "-":
+                sign = -1
             else:
-                if b == 0:
-                    return DIV
-                res = abs(a) // abs(b)
-                if (a < 0) != (b < 0):
-                    res = -res
-        if abs(res) >= _SHEET_LIMIT:
-            raise _SheetOverflow()
-        return res
+                v = int(t) if t[0].isdigit() else cell(t)
+                if v == _SHEET_CYCLE:
+                    cyc = True
+                else:
+                    total += sign * v
+                    if abs(total) >= _SHEET_LIMIT:
+                        raise _SheetOverflow()
+        return _SHEET_CYCLE if cyc else total
 
     old = sys.getrecursionlimit()
     sys.setrecursionlimit(200000)
     try:
-        out = []
-        for name in sorted(cells, key=lambda c: (c[0], int(c[1:]))):
-            out.append("%s=%s" % (name, cell(name)))
+        return {name: cell(name) for name in cells}
     finally:
         sys.setrecursionlimit(old)
-    return "\n".join(out) + "\n"
+
+
+def ref_sheet(inp):
+    vals = _sheet_values(inp)
+    names = sorted(vals, key=lambda c: (c[0], int(c[1:])))
+    return "".join("%s=%s\n" % (name, vals[name]) for name in names)
 
 
 def _sheet_random(seed, ncols, nrows, n):
@@ -1437,27 +1358,15 @@ def _sheet_random(seed, ncols, nrows, n):
             return order[r.randint(0, rank[target] - 1)]
         return r.choice(order)
 
-    def gen(target, depth):
-        x = r.randint(1, 100)
-        if depth == 0 or x <= 30:
-            if r.chance(45):
-                return str(r.randint(0, 30))
-            return ref_cell(target)
-        if x <= 40:
-            return "-" + gen(target, depth - 1)
-        if x <= 50:
-            return "(" + gen(target, depth - 1) + ")"
-        op = r.choice(["+", "+", "-", "-", "*", "/"])
-        pad = " " if r.chance(30) else ""
-        if op == "/":
-            # Divisors are non-zero literals: the task has no division by zero.
-            return gen(target, depth - 1) + pad + op + pad + str(r.randint(1, 9))
-        return gen(target, depth - 1) + pad + op + pad + gen(target, depth - 1)
-
     lines = []
     for _ in range(n):
         target = r.choice(order)
-        lines.append("%s=%s" % (target, gen(target, 3)))
+        parts = []
+        for i in range(r.randint(1, 4)):
+            if i:
+                parts.append(r.choice("+-"))
+            parts.append(str(r.randint(0, 30)) if r.chance(40) else ref_cell(target))
+        lines.append("%s=%s" % (target, "".join(parts)))
     return "%d\n%s\n" % (len(lines), "\n".join(lines))
 
 
@@ -1465,51 +1374,50 @@ def sheet_tests():
     def mk(*assigns):
         return "%d\n%s\n" % (len(assigns), "\n".join(assigns))
 
-    chain = ["A1=1"] + ["%s%d=%s%d+1" % (chr(65 + (i // 99)), i % 99 + 1,
-                                          chr(65 + ((i - 1) // 99)), (i - 1) % 99 + 1)
-                        for i in range(1, 400)]
-    chain_rev = list(reversed(chain))
+    def cell_name(i):
+        return "%s%d" % (chr(65 + i // 99), i % 99 + 1)
+
+    chain = ["A1=1"] + ["%s=%s+1" % (cell_name(i), cell_name(i - 1)) for i in range(1, 400)]
+    # Every cell uses the next one three times and the output starts at the top: without
+    # memoization the evaluation takes 3^59 steps. All values are 1.
+    shared = ["A60=1"] + ["A%d=A%d+A%d-A%d" % (i, i + 1, i + 1, i + 1) for i in range(59, 0, -1)]
     # Each test needs as few features as possible: constants first, then references, then cycles.
     cases = [
-        ("constants", mk("A1=7", "B1=0", "C1=1234567890", "D1=42")),
-        ("arithmetic and precedence", mk("A1=1+2*3", "A2=10-4-3", "A3=100/7/2", "A4=2*3+4*5-6/2",
-                                         "B1=7", "B2=1234567890*8", "B3=2-3*4")),
-        ("parentheses", mk("A1=(1+2)*3", "A2=((7))", "A3=2*(3+(4-1))*2", "A4=(10-4)-(3-1)",
-                           "A5=100/(7-2)")),
-        ("unary minus and truncating division", mk("A1=-7/2", "A2=7/-2", "A3=-7/-2", "A4=0-9",
-                                                   "A5=--3", "A6=2*-3", "A7=-(2+3)*-2", "A8=8/-3",
-                                                   "A9=-0")),
-        ("whitespace", mk("A1= 3 +  4", "A2 = - - 3", "A3=( ( ( 7 ) ) )", "A4= 2 * ( 1 + 1 ) ",
-                          " A5=10 / 3")),
-        ("references to earlier cells", mk("A1=5", "B2=A1*A1", "C3=A1+B2", "D4=C3-B2-A1", "E5=-A1",
-                                           "F6=(A1+B2)*2")),
-        ("forward references and unassigned cells", mk("C3=A1+B2", "B2=A1*A1", "A1=5", "D1=Z99+1",
-                                                       "D2=C3-D1", "E1=E2", "E2=40+2")),
+        ("constants", mk("A1=7", "B1=0", "C1=123456789", "D1=42")),
+        ("addition and subtraction", mk("A1=1+2", "A2=10-4-3", "A3=5-9", "A4=100+20-3+4-50",
+                                        "A5=0-0", "A6=999999999+999999999+999999999-1", "B1=8-8-8")),
+        ("references to earlier cells", mk("A1=5", "B2=A1+A1", "C3=A1+B2", "D4=C3-B2-A1", "E5=0-A1",
+                                           "F6=A1+B2+C3+7")),
+        ("forward references", mk("C3=A1+B2", "B2=A1+A1", "A1=5", "D1=C3-B2", "E1=E2", "E2=40+2")),
+        ("unassigned cells", mk("A1=Z99+1", "A2=B7-B8+3", "A3=A1+C5", "B1=A3-A2", "C1=0-Q10")),
         ("output order", mk("A10=1", "A2=2", "B11=5", "Z1=4", "A1=3", "B2=6", "A9=9", "M5=8",
                             "A99=7", "B1=0")),
-        ("reassigned cells", mk("A1=1", "A2=A1+1", "A1=10", "B1=A2", "B1=A2*2", "A3=5", "A3=A3",
+        ("reassigned cells", mk("A1=1", "A2=A1+1", "A1=10", "B1=A2", "B1=A2+A2", "A3=5", "A3=A3",
                                 "A3=6")),
-        ("cycle: a cell that refers to itself", mk("A1=A1", "B1=5", "C1=C1+1", "D1=B1*2")),
-        ("cycles through other cells", mk("B1=B2", "B2=B3+1", "B3=B1*2", "C1=B2+5", "C2=7",
-                                          "C3=C2+C2", "G1=C1-C1", "H1=0*B1", "D1=D2", "D2=D1",
+        ("cycle: a cell that refers to itself", mk("A1=A1", "B1=5", "C1=C1+1", "D1=B1+B1",
+                                                   "E1=E1-E1")),
+        ("cycles through other cells", mk("B1=B2", "B2=B3+1", "B3=B1+2", "C1=B2+5", "C2=7",
+                                          "C3=C2+C2", "G1=C1-C1", "H1=B1-B1+3", "D1=D2", "D2=D1",
                                           "E1=C3+1")),
+        ("shared references", mk(*shared)),
         ("long chain", mk(*chain)),
-        ("long chain, reverse order", mk(*chain_rev)),
+        ("long chain, reverse order", mk(*list(reversed(chain)))),
     ]
     tests = [T(name, inp, ref_sheet(inp)) for name, inp in cases]
+    # The first seeds whose sheets mix numbers and cycles (10-60% #CYCLE!) and stay small.
     seed = 300
-    made = 0
-    sizes = [(4, 6, 40), (10, 20, 600), (26, 60, 3000)]
-    while made < len(sizes):
-        seed += 1
-        inp = _sheet_random(seed, *sizes[made])
-        try:
-            exp = ref_sheet(inp)
-        except _SheetOverflow:
-            continue
-        assert "#DIV" not in exp
-        tests.append(T("random sheet %d assignments" % sizes[made][2], inp, exp))
-        made += 1
+    for ncols, nrows, n in [(4, 6, 40), (10, 20, 600), (26, 60, 3000)]:
+        while True:
+            seed += 1
+            inp = _sheet_random(seed, ncols, nrows, n)
+            try:
+                vals = _sheet_values(inp)
+            except _SheetOverflow:
+                continue
+            share = sum(v == _SHEET_CYCLE for v in vals.values()) / len(vals)
+            if 0.1 <= share <= 0.6:
+                break
+        tests.append(T("random sheet %d assignments" % n, inp, ref_sheet(inp)))
     return tests
 
 
@@ -1517,92 +1425,55 @@ SHEET_SOLUTION = r'''using System;
 using System.Collections.Generic;
 using System.Text;
 
-class Node { public char K; public long N; public string A, B; public Node L, R; }
-
 class Program {
-    static string src; static int p;
-    static Dictionary<string, Node> cells = new Dictionary<string, Node>();
+    static Dictionary<string, string> cells = new Dictionary<string, string>();
     static Dictionary<string, long> memo = new Dictionary<string, long>();
     static HashSet<string> busy = new HashSet<string>();
-    const long CYC = long.MinValue, DIV = long.MinValue + 1;
+    const long CYC = long.MinValue;
 
-    static Node Expr() {
-        Node n = Term();
-        while (p < src.Length && (src[p] == '+' || src[p] == '-')) { char op = src[p++]; n = new Node { K = op, L = n, R = Term() }; }
-        return n;
-    }
-    static Node Term() {
-        Node n = Factor();
-        while (p < src.Length && (src[p] == '*' || src[p] == '/')) { char op = src[p++]; n = new Node { K = op, L = n, R = Factor() }; }
-        return n;
-    }
-    static string Cell() {
-        int s = p; p++;
-        while (p < src.Length && char.IsDigit(src[p])) p++;
-        return src.Substring(s, p - s);
-    }
-    static Node Factor() {
-        char c = src[p];
-        if (c == '-') { p++; return new Node { K = 'n', L = Factor() }; }
-        if (c == '(') { p++; Node n = Expr(); p++; return n; }
-        if (char.IsDigit(c)) { int s = p; while (p < src.Length && char.IsDigit(src[p])) p++; return new Node { K = '#', N = long.Parse(src.Substring(s, p - s)) }; }
-        if (src.Length - p >= 4 && src.Substring(p, 4) == "SUM(") { p += 4; string a = Cell(); p++; string b = Cell(); p++; return new Node { K = 's', A = a, B = b }; }
-        return new Node { K = 'c', A = Cell() };
-    }
-    static long Comb(long a, long b) { if (a == CYC || b == CYC) return CYC; if (a == DIV || b == DIV) return DIV; return 0; }
-    static bool Err(long v) { return v == CYC || v == DIV; }
     static long Get(string name) {
         long v;
         if (memo.TryGetValue(name, out v)) return v;
-        Node n;
-        if (!cells.TryGetValue(name, out n)) return 0;
+        string src;
+        if (!cells.TryGetValue(name, out src)) return 0;
         if (busy.Contains(name)) return CYC;
         busy.Add(name);
-        v = Ev(n);
+        v = Eval(src);
         busy.Remove(name);
         memo[name] = v;
         return v;
     }
-    static long Ev(Node n) {
-        switch (n.K) {
-            case '#': return n.N;
-            case 'c': return Get(n.A);
-            case 'n': { long v = Ev(n.L); return Err(v) ? v : -v; }
-            case 's': {
-                long sum = 0; bool cyc = false, div = false;
-                int r1 = int.Parse(n.A.Substring(1)), r2 = int.Parse(n.B.Substring(1));
-                for (char c = n.A[0]; c <= n.B[0]; c++)
-                    for (int r = r1; r <= r2; r++) {
-                        long v = Get(c.ToString() + r);
-                        if (v == CYC) cyc = true; else if (v == DIV) div = true; else sum += v;
-                    }
-                return cyc ? CYC : div ? DIV : sum;
-            }
+
+    static long Eval(string s) {
+        long total = 0, sign = 1;
+        bool cyc = false;
+        int p = 0;
+        while (p < s.Length) {
+            char c = s[p];
+            if (c == '+' || c == '-') { sign = c == '+' ? 1 : -1; p++; continue; }
+            int start = p++;
+            while (p < s.Length && char.IsDigit(s[p])) p++;
+            string tok = s.Substring(start, p - start);
+            long v = char.IsLetter(c) ? Get(tok) : long.Parse(tok);
+            if (v == CYC) cyc = true; else total += sign * v;
         }
-        long a = Ev(n.L), b = Ev(n.R);
-        long e = Comb(a, b);
-        if (e != 0) return e;
-        switch (n.K) {
-            case '+': return a + b;
-            case '-': return a - b;
-            case '*': return a * b;
-            default: return b == 0 ? DIV : a / b;
-        }
+        return cyc ? CYC : total;
     }
+
     static void Main() {
         int n = int.Parse(Console.ReadLine().Trim());
         for (int i = 0; i < n; i++) {
-            string line = Console.ReadLine().Replace(" ", "");
+            string line = Console.ReadLine().Trim();
             int eq = line.IndexOf('=');
-            src = line.Substring(eq + 1); p = 0;
-            cells[line.Substring(0, eq)] = Expr();
+            cells[line.Substring(0, eq)] = line.Substring(eq + 1);
         }
         var names = new List<string>(cells.Keys);
-        names.Sort((x, y) => x[0] != y[0] ? x[0].CompareTo(y[0]) : int.Parse(x.Substring(1)).CompareTo(int.Parse(y.Substring(1))));
+        names.Sort((x, y) => x[0] != y[0] ? x[0].CompareTo(y[0])
+                                          : int.Parse(x.Substring(1)).CompareTo(int.Parse(y.Substring(1))));
         var sb = new StringBuilder();
         foreach (string name in names) {
             long v = Get(name);
-            sb.Append(name).Append('=').Append(v == CYC ? "#CYCLE!" : v == DIV ? "#DIV/0!" : v.ToString()).Append('\n');
+            sb.Append(name).Append('=').Append(v == CYC ? "#CYCLE!" : v.ToString()).Append('\n');
         }
         Console.Write(sb.ToString());
     }
@@ -3023,23 +2894,33 @@ task(id="java_bugfix_sensors", lang="java", category="bugfix",
 # the reference machine), so they do not depend on small speed differences.
 # ==========================================================================
 
-# ---- Python: subarrays with a given sum -----------------------------------
+# ---- Python: submatrices with a given sum ---------------------------------
 
-SUBSUM_SPEC = r"""Input: line 1 holds n and k (1 <= n <= 1000000, |k| <= 10^9). Line 2 holds n integers a_1..a_n (|a_i| <= 10000).
-Output: the number of non-empty contiguous subarrays whose elements sum to exactly k."""
+SUBSUM_SPEC = r"""Input: line 1 holds r, c and k (1 <= r, c <= 3000, r <= 25 or c <= 25, |k| <= 10^9). Then r lines of c integers each: the rows of a matrix A (|A[i][j]| <= 1000).
+Output: the number of submatrices of A whose elements sum to exactly k. A submatrix is a non-empty block of consecutive rows and consecutive columns."""
 
 SUBSUM_GIVEN = r'''import sys
 
 
 def main():
     data = sys.stdin.read().split()
-    n, k = int(data[0]), int(data[1])
-    a = [int(x) for x in data[2:2 + n]]
+    r, c, k = int(data[0]), int(data[1]), int(data[2])
+    a = []
+    pos = 3
+    for _ in range(r):
+        a.append([int(x) for x in data[pos:pos + c]])
+        pos += c
     count = 0
-    for i in range(n):
-        for j in range(i + 1, n + 1):
-            if sum(a[i:j]) == k:
-                count += 1
+    for r1 in range(r):
+        for r2 in range(r1, r):
+            for c1 in range(c):
+                for c2 in range(c1, c):
+                    s = 0
+                    for i in range(r1, r2 + 1):
+                        for j in range(c1, c2 + 1):
+                            s += a[i][j]
+                    if s == k:
+                        count += 1
     print(count)
 
 
@@ -3047,19 +2928,27 @@ main()
 '''
 
 SUBSUM_FAST = r'''import sys
+from itertools import accumulate
 
 
 def main():
     data = sys.stdin.buffer.read().split()
-    n, k = int(data[0]), int(data[1])
-    seen = {0: 1}
-    s = 0
+    r, c, k = int(data[0]), int(data[1]), int(data[2])
+    vals = list(map(int, data[3:3 + r * c]))
+    rows = [vals[i * c:(i + 1) * c] for i in range(r)]
+    if r > c:
+        rows = [list(col) for col in zip(*rows)]
+        r, c = c, r
     count = 0
-    get = seen.get
-    for x in data[2:2 + n]:
-        s += int(x)
-        count += get(s - k, 0)
-        seen[s] = get(s, 0) + 1
+    for top in range(r):
+        col = [0] * c
+        for bottom in range(top, r):
+            col = [x + y for x, y in zip(col, rows[bottom])]
+            seen = {0: 1}
+            get = seen.get
+            for s in accumulate(col):
+                count += get(s - k, 0)
+                seen[s] = get(s, 0) + 1
     print(count)
 
 
@@ -3067,42 +2956,63 @@ main()
 '''
 
 
-def ref_subsum(n, k, a):
-    seen = {0: 1}
-    s = count = 0
-    get = seen.get
-    for x in a:
-        s += x
-        count += get(s - k, 0)
-        seen[s] = get(s, 0) + 1
+def ref_subsum(k, rows):
+    if len(rows) > len(rows[0]):
+        rows = [list(col) for col in zip(*rows)]
+    count = 0
+    for top in range(len(rows)):
+        col = [0] * len(rows[0])
+        for row in rows[top:]:
+            col = [x + y for x, y in zip(col, row)]
+            seen = {0: 1}
+            s = 0
+            for x in col:
+                s += x
+                count += seen.get(s - k, 0)
+                seen[s] = seen.get(s, 0) + 1
     return "%d\n" % count
 
 
-def _subsum_case(name, k, a, **kw):
-    inp = "%d %d\n%s\n" % (len(a), k, " ".join(map(str, a)))
-    return T(name, inp, ref_subsum(len(a), k, a), **kw)
+def _subsum_case(name, k, rows, **kw):
+    inp = "%d %d %d\n%s\n" % (len(rows), len(rows[0]), k,
+                              "\n".join(" ".join(map(str, row)) for row in rows))
+    return T(name, inp, ref_subsum(k, rows), **kw)
+
+
+def _subsum_matrix(r, c, m, salt):
+    """Small values in [-m//2, m//2] from a closed form, so that many submatrices match."""
+    return [[(i * i * 31 + j * j * 7 + i * j * 13 + j * 5 + i * 3 + salt) % m - m // 2
+             for j in range(c)] for i in range(r)]
 
 
 def subsum_tests():
-    r = Rng(1100)
+    rnd = Rng(1100)
+
+    def rand(r, c, lo, hi):
+        return [[rnd.randint(lo, hi) for _ in range(c)] for _ in range(r)]
+
     tests = [
-        _subsum_case("small example", 3, [1, 2, 1, -1, 3, 0, 0, 3], weight=0.5),
-        _subsum_case("all zeros, k = 0", 0, [0] * 60, weight=0.5),
-        _subsum_case("single element", -5, [-5], weight=0.5),
-        _subsum_case("no match", 10 ** 9, [r.randint(-50, 50) for _ in range(120)], weight=0.5),
-        _subsum_case("random small", 7, [r.randint(-6, 6) for _ in range(150)], weight=0.5),
+        _subsum_case("small example", 4, [[1, 2, -1, 3], [0, 2, 2, -2], [3, -3, 1, 1]], weight=0.5),
+        _subsum_case("all zeros, k = 0", 0, [[0] * 9 for _ in range(7)], weight=0.5),
+        _subsum_case("single cell", -5, [[-5]], weight=0.5),
+        _subsum_case("single row", 3, rand(1, 60, -4, 4), weight=0.5),
+        _subsum_case("single column", -2, rand(60, 1, -4, 4), weight=0.5),
+        _subsum_case("no match", 10 ** 9, rand(9, 11, -1000, 1000), weight=0.5),
+        _subsum_case("more rows than columns", 6, rand(14, 5, -5, 5), weight=0.5),
     ]
-    a = [((i * i * 31 + i * 17 + 5) % 9) - 4 for i in range(3000)]
-    tests.append(_subsum_case("tier 1: n = 3000", 4, a, limit=3.0, weight=1.5, timed=True))
-    a = [((i * i * 13 + i * 7 + 3) % 11) - 5 for i in range(200000)]
-    tests.append(_subsum_case("tier 2: n = 200000", -3, a, limit=3.0, weight=3.0, timed=True))
-    a = [((i * i * 29 + i * 11 + 1) % 2003) - 1001 for i in range(1000000)]
-    tests.append(_subsum_case("tier 3: n = 1000000", 12, a, limit=3.0, weight=3.0, timed=True))
+    # Tier 1 rejects only the given program. Tiers 2 and 3 need O(min(r,c)^2 * max(r,c)):
+    # pairing the rows (or the columns) in both orientations takes about 30 s on one of them.
+    tests.append(_subsum_case("tier 1: 25 x 150", 3, _subsum_matrix(25, 150, 7, 1),
+                              limit=3.0, weight=2.0, timed=True))
+    tests.append(_subsum_case("tier 2: 25 x 3000 (wide)", 7, _subsum_matrix(25, 3000, 9, 2),
+                              limit=3.0, weight=3.0, timed=True))
+    tests.append(_subsum_case("tier 3: 3000 x 25 (tall)", -4, _subsum_matrix(3000, 25, 9, 3),
+                              limit=3.0, weight=3.0, timed=True))
     return tests
 
 
 task(id="py_opt_subsum", lang="python", category="optimize",
-     title="Count subarrays with a given sum",
+     title="Count submatrices with a given sum",
      spec=SUBSUM_SPEC, given=SUBSUM_GIVEN, solution=SUBSUM_FAST, tests=subsum_tests)
 
 
