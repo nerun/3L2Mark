@@ -75,6 +75,13 @@ python3 codebench.py --records results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS> --remove
 python3 codebench.py --runs 5 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
 ```
 
+When a new version changes only a few tasks, a run made by an older version does not have to be redone from scratch. `--migrate` copies it to a new folder (`<YYYYMMDD-HHMMSS>-betaN`) without the answers of the changed tasks, leaving the original untouched; resuming the copy asks only those again:
+
+```sh
+python3 codebench.py --migrate results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>
+python3 codebench.py --runs 5 --resume results/<MODEL FOLDER>/<YYYYMMDD-HHMMSS>-betaN
+```
+
 When finished, use:
 
 ```sh

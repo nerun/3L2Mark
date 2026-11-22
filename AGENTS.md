@@ -27,6 +27,7 @@ python3 codebench.py                       # full run against the server
 python3 codebench.py --runs 3              # mean of 3 answers per task, reports the standard deviation
 python3 codebench.py --compare             # ranking of all stored results
 python3 codebench.py --resume results/<model>/<timestamp>
+python3 codebench.py --migrate results/<model>/<timestamp>   # copy to <timestamp>-betaN without the changed tasks
 ```
 
 Toolchains on Debian: `sudo apt install default-jdk-headless dotnet10 gcc g++ mono-mcs php-cli`. SQL uses Python's built-in `sqlite3` (needs SQLite >= 3.35).
@@ -113,6 +114,8 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 **Changing tasks, tests, prompts or weights changes what a score means.** Bump `VERSION` whenever you do. The version is stored in `results.json` (`meta.version`) and shown in `report.md`; `--compare` lists it per model and warns when versions differ, and `--resume` refuses a run created by another version.
 
 **`COMPAT` lists the Beta numbers whose scores are interchangeable with the current version.** A change that leaves tasks, tests, prompts and weights alone (reporting, `--compare`, bug fixes outside grading) still bumps `VERSION`, and the new number is appended to `COMPAT`. A change that alters what a score means resets `COMPAT` to the new number alone. Versions inside `COMPAT` do not trigger the `--compare` warning and can be resumed (`version_group`).
+
+**`MIGRATE_FROM` and `MIGRATE_REDO` let old runs survive a task change.** `--migrate DIR` copies a run whose Beta number is in `MIGRATE_FROM` to `DIR-betaN`, drops the records and answer files of the tasks in `MIGRATE_REDO`, stamps the current `VERSION` and a `meta.migrated_from` note (kept by `--resume`, shown in `report.md`), and leaves `DIR` untouched; `--resume` then asks only the dropped tasks. When a change alters some tasks and leaves every other task, test, prompt and weight alone, set `MIGRATE_FROM` to the old `COMPAT` (plus the older numbers already there, if `MIGRATE_REDO` still covers what changed since them) and add the changed task ids to `MIGRATE_REDO`. When a change alters what every score means (a prompt, the grading), empty `MIGRATE_FROM`. `--compare` breaks date ties by version, so a migrated copy wins over its source.
 
 ## Results format
 

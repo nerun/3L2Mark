@@ -61,10 +61,14 @@ import zlib
 from fractions import Fraction
 from html import escape as html_escape
 
-VERSION = "1.0 Beta 18"
+VERSION = "1.0 Beta 19"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [18]
+COMPAT = [18, 19]
+# --migrate: runs made by these Beta versions can be brought to this version, because only the
+# tasks in MIGRATE_REDO changed since then. Their records are dropped and --resume asks them again.
+MIGRATE_FROM = [13, 14, 15, 16, 17]
+MIGRATE_REDO = ["py_opt_subsum", "cs_write_sheet"]
 DEFAULT_URL = "http://127.0.0.1:9931"
 M64 = (1 << 64) - 1
 
@@ -5096,6 +5100,11 @@ def fmt_tps(mean, stdev):
     return "%.1f" % mean + ("" if stdev is None else " ±%.1f" % stdev)
 
 
+def beta_number(version):
+    m = re.match(r"1\.0 Beta (\d+)$", version or "")
+    return int(m.group(1)) if m else None
+
+
 def version_group(version):
     """Versions listed in COMPAT share one group; any other version is a group of its own."""
     m = re.match(r"1\.0 Beta (\d+)$", version or "")
@@ -5155,6 +5164,10 @@ def write_report(path, meta, results, tasks):
     add("| Machine | %s |" % meta["machine"])
     add("| Toolchains | %s |" % "; ".join("%s: %s" % (LANG_LABEL[k], v) for k, v in meta["toolchains"].items()))
     add("| Benchmark version | %s |" % meta.get("version", "unknown"))
+    mig = meta.get("migrated_from")
+    if mig:
+        add("| Migrated from | %s (%s); asked again: %s |" % (
+            mig.get("version", "?"), mig.get("dir", "?"), ", ".join(mig.get("redo", []))))
     add("")
 
     add("## Score by category")
@@ -5584,7 +5597,8 @@ def compare(out_dir, show_all=False):
     if not found:
         print("No results found under %s" % out_dir)
         return 1
-    found.sort(key=lambda d: d["meta"]["date"])
+    # A migrated run keeps the date of its source: the higher version is the later one.
+    found.sort(key=lambda d: (d["meta"]["date"], beta_number(d["meta"].get("version")) or 0))
     if not show_all:
         latest = {}
         for d in found:
@@ -5723,6 +5737,10 @@ def parse_args(argv):
                    help="list the stored records of the run in DIR, one line each, and exit")
     p.add_argument("--remove", type=int, metavar="N",
                    help="with --records: delete record number N (as listed) so that --resume asks it again")
+    p.add_argument("--migrate", metavar="DIR",
+                   help="copy the run in DIR, made by an older compatible version, to DIR-betaN "
+                        "without the records of the tasks that changed since, and exit; then "
+                        "--resume the copy to ask only those again")
     p.add_argument("--selftest", action="store_true", help="validate toolchains and tasks with the reference solutions (no model)")
     p.add_argument("--compare", action="store_true", help="rank all models found in the results folder and exit")
     p.add_argument("--compare-all", action="store_true", help="like --compare but lists every stored run")
@@ -5764,6 +5782,56 @@ def records_cmd(run_dir, remove):
     return 0
 
 
+def migrate_cmd(run_dir):
+    """Copy a run of an older compatible version into a new folder, without the records of
+    the tasks that changed since then, so that --resume asks only those again."""
+    run_dir = run_dir.rstrip("/")
+    path = os.path.join(run_dir, "results.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print("Cannot read %s: %s" % (path, e))
+        return 2
+    old_version = data["meta"].get("version", "unknown")
+    if version_group(old_version) == version_group(VERSION):
+        print("%s was made by codebench %s, which is compatible with %s: nothing to migrate."
+              % (run_dir, old_version, VERSION))
+        return 0
+    if beta_number(old_version) not in MIGRATE_FROM:
+        print("Cannot migrate %s: codebench %s can only migrate runs of Beta %s, and this one "
+              "was made by %s." % (run_dir, VERSION, ", ".join(map(str, MIGRATE_FROM)), old_version))
+        return 2
+    dest = "%s-beta%d" % (run_dir, beta_number(VERSION))
+    if os.path.exists(dest):
+        print("Cannot migrate: %s already exists." % dest)
+        return 2
+    prefixes = tuple("%s_run" % tid for tid in MIGRATE_REDO)
+
+    def ignore(folder, names):
+        skip = {n for n in names if n.startswith(prefixes)}
+        if os.path.abspath(folder) == os.path.abspath(run_dir):
+            skip |= {"results.json", "results.json.bak", "report.md"} & set(names)
+        return skip
+
+    shutil.copytree(run_dir, dest, ignore=ignore)
+    kept = [r for r in data["results"] if r["task"] not in MIGRATE_REDO]
+    meta = dict(data["meta"])
+    meta["version"] = VERSION
+    meta["partial"] = True
+    meta["migrated_from"] = {"version": old_version, "dir": run_dir, "redo": list(MIGRATE_REDO),
+                             "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    with open(os.path.join(dest, "results.json"), "w", encoding="utf-8") as f:
+        json.dump({"meta": meta, "results": kept}, f, indent=1)
+    write_report(os.path.join(dest, "report.md"), meta, kept, list(TASKS))
+    print("Migrated %s (%s) to %s (%s)." % (run_dir, old_version, dest, VERSION))
+    print("Kept %d record(s), dropped %d of the changed tasks (%s). The source folder is untouched."
+          % (len(kept), len(data["results"]) - len(kept), ", ".join(MIGRATE_REDO)))
+    print("Ask them again with:  python3 %s --resume %s --runs %s  (same options as the original run)"
+          % (sys.argv[0], dest, meta.get("runs", 1)))
+    return 0
+
+
 def select_tasks(only):
     if not only:
         return list(TASKS)
@@ -5780,6 +5848,8 @@ def main(argv=None):
         return 2
     if args.records:
         return records_cmd(args.records, args.remove)
+    if args.migrate:
+        return migrate_cmd(args.migrate)
 
     tasks = select_tasks(args.only)
     if args.list:
@@ -5875,6 +5945,8 @@ def main(argv=None):
                        for l in needed if tc[l]["ok"]},
         "skipped_langs": [LANG_LABEL[l] for l in missing], "planned": len(plan), "version": VERSION,
     }
+    if args.resume and old["meta"].get("migrated_from"):
+        meta["migrated_from"] = old["meta"]["migrated_from"]
 
     def save(partial):
         meta["partial"] = partial
