@@ -62,10 +62,10 @@ import zlib
 from fractions import Fraction
 from html import escape as html_escape
 
-VERSION = "1.0 Beta 20"
+VERSION = "1.0 Beta 21"
 # Compatibility with codebench.py Beta engines: Beta numbers whose tasks, tests, prompts and
 # weights are the same as in this version, so their scores can be mixed and compared.
-COMPAT = [18, 19, 20]
+COMPAT = [18, 19, 20, 21]
 # --migrate: runs made by these Beta versions can be brought to this version, because only the
 # tasks in MIGRATE_REDO changed since then. Their records are dropped and --resume asks them again.
 MIGRATE_FROM = [13, 14, 15, 16, 17]
@@ -5599,8 +5599,6 @@ def md_to_html(md):
 
 def comparison_html(md):
     """Wrap comparison.md in a self-contained, styled HTML page (heat-map cells, callouts, favicon)."""
-    m = re.search(r"^# (.+)$", md, re.M)
-    title = html_escape(m.group(1) if m else "3L2Mark Report", quote=False)
     icon = "data:image/png;base64," + FAVICON_PNG_B64
     return """<!DOCTYPE html>
 <html lang="en">
@@ -5611,7 +5609,7 @@ def comparison_html(md):
 <meta name="author" content="3L2Mark">
 <meta name="copyright" content="&copy; 2026 Daniel Dias Rodrigues">
 <link rel="icon" type="image/png" href="%s">
-<title>%s</title>
+<title>3L2Mark Report</title>
 <style>%s</style>
 </head>
 <body>
@@ -5620,7 +5618,7 @@ def comparison_html(md):
 </main>
 </body>
 </html>
-""" % (icon, title, HTML_CSS, md_to_html(md))
+""" % (icon, HTML_CSS, md_to_html(md))
 
 
 def compare(out_dir, show_all=False):
