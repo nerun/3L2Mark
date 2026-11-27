@@ -4,14 +4,11 @@ Guidance for coding agents working on `codebench.py`.
 
 ## Git rules
 
-- In commit messages, instead of **"Co-Authored-By"**, the agent should always use **"Assisted-by"**, without exception. When the agent detects the presence of the **"Co-Authored-By"** tag, it should replace it with **"Assisted-by"**.
 - Never commit or push without authorization or explicit instruction to do so.
 
 ## What this is
 
 `codebench.py` is a single-file, standard-library-only Python benchmark that compares local LLMs on programming tasks. It talks to an OpenAI-compatible endpoint served by llama.cpp (default `http://127.0.0.1:9931`), asks the model to solve 21 tasks, compiles and runs every answer against hidden tests, and writes a Markdown report with a 0-100 score.
-
-It exists to tell apart very similar models (fine-tunes and distills of the same 9B base). Everything follows from that:
 
 - **Grading is objective only.** A test passes or fails by program. No visual judgement, no LLM judge, no style scoring.
 - **Partial credit matters.** Tasks have many independent tests so that near-identical models land on different scores.
@@ -38,7 +35,7 @@ Toolchains on Debian: `sudo apt install default-jdk-headless dotnet10 gcc g++ mo
 
 - One file, Python standard library only, no install step. The user runs one script.
 - Linux only (`resource`, process groups, `/proc/cpuinfo`).
-- All program messages, comments, prompts and reports are in English.
+- Prompts and reports are in English.
 - The script never sends sampling parameters unless asked (`--temperature`, `--top-p`, `--extra-json`). The user configures the model on the server; the benchmark only sends `seed` and `max_tokens`.
 - Each task is an independent request with no history.
 
@@ -77,7 +74,7 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 ## Invariants (enforced by `--selftest` or by convention)
 
 1. **Every reference scores 100%.** For bugfix tasks the reference is `apply_fixes(given, fixes)`; each anchor must occur exactly once.
-2. **Every `given` program scores below 50%** (currently 0-33%; the `cs_write_sheet` skeleton scores 0). In bugfix tasks only a few "base" tests may pass on the buggy code; in optimize tasks the small correctness tests weigh 0.5 each so that the unchanged program gets about 25%.
+2. **Every `given` program scores below 50%**. In bugfix tasks only a few "base" tests may pass on the buggy code; in optimize tasks the small correctness tests weigh 0.5 each so that the unchanged program gets about 25%.
 3. **Time limits are far from both sides.** Reference solutions take well under 1 s against limits of 2-4 s; slow originals do not finish at 5x the limit. Never add a tier where a plausible solution sits near the limit: that turns CPU speed into score noise. Measure before choosing sizes.
 4. **Determinism.** Generate test data only with `Rng` (a fixed LCG) or closed-form arithmetic, never `random`. Results must be identical on every Python version.
 5. **Each bug has isolated tests.** A test should fail because of one bug where possible, so fixing k of n bugs yields proportional credit. When bugs unavoidably interact, order tests from independent to combined.
@@ -90,14 +87,14 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 - **`dotnet build` needs NuGet restore (network).** C# is compiled by calling Roslyn directly (`dotnet <sdk>/Roslyn/bincore/csc.dll`) with a hand-written `runtimeconfig.json`. Do not switch back to MSBuild.
 - **The C# target is part of the prompt** (`lang_requirements`): .NET if an SDK exists, otherwise Mono `mcs` (C# 7). Scores from different C# toolchains are not comparable.
 - **Rounding ties.** Averages printed with two decimals must never land exactly on `x.xx5`: C, Python, .NET and Mono round ties differently. `avg_is_tie()` rejects such generated tests.
-- **Accidentally masked bugs.** The Python closure bug was hidden because a later loop reused the same variable name. After editing a `given` program, check with `--selftest` that its score did not rise.
+- **Accidentally masked bugs.** Surrounding code can hide a planted bug (a later loop reusing a variable name). After editing a `given` program, check with `--selftest` that its score did not rise.
 - **Runtime-dependent behaviour.** Avoid bugs that differ between runtimes (`Dictionary.Remove` during enumeration throws on Mono but not on .NET Core 3+; culture-aware string comparison; PHP 7 vs 8 loose comparison of non-numeric strings).
 - **Programs run with `LC_ALL=C.UTF-8`** so that number formatting does not depend on the user's locale.
 - **SQLite and correlated subqueries.** The slow query in `sql_opt_events` is only slow enough at the current tier sizes; re-measure the unchanged query if you touch them.
 - **The JVM logs warnings to stdout.** In containers (Google Colab) it prints `[0.001s][warning][os,container] ...` before the program's output, failing every Java test. Java runs with `JVM_QUIET` (`-Xlog` sent to stderr); `is_jvm_noise()` filters the same lines from `javac` output.
 - **ASan start-up failures.** On some kernels and containers a sanitizer build exits with status 1 at random, before `main`, because of address-space randomization. Sanitizer runs disable ASLR (`personality`, best effort) and a crash without a sanitizer report is retried up to `SAN_RETRIES` times. A real crash reproduces, so this cannot turn a failure into a pass by luck alone.
-- **Reasoning loops.** Small models often get stuck repeating one block of reasoning until `max_tokens`. Raising the cap does not help; `LoopWatch` stops the answer early (finish reason `loop`, counted as cut off) once the tail of the stream is thousands of characters of exact repetition. A second rule catches loops that change a little on every turn: the last `LOOP_Z_WINDOW` characters compress (zlib) below `LOOP_Z_RATIO` on `LOOP_Z_CHECKS` checks in a row. A low ratio alone is not enough: models repeat themselves for a while and still recover and score 100%, so only lasting repetition counts. The thresholds were calibrated on 186 stored answers (no finished answer stayed low for more than 2 checks; stuck ones for 7 or more); replay stored answers through `LoopWatch` before changing them. Keep both rules strict: a false positive would change a score. `--no-loop-detection` turns them off.
-- **One mistake must not void a whole task.** Every write task scored 0 for two models until its tests were split: the first tests need one feature each (sort without constraints, constants without references), and outputs carry no header that a single omission would break in every test. Keep new tasks that way.
+- **Reasoning loops.** Small models often get stuck repeating one block of reasoning until `max_tokens`. Raising the cap does not help; `LoopWatch` stops the answer early (finish reason `loop`, counted as cut off) once the tail of the stream is thousands of characters of exact repetition. A second rule catches loops that change a little on every turn: the last `LOOP_Z_WINDOW` characters compress (zlib) below `LOOP_Z_RATIO` on `LOOP_Z_CHECKS` checks in a row. A low ratio alone is not enough: models repeat themselves for a while and still recover and score 100%, so only lasting repetition counts. Replay stored answers through `LoopWatch` before changing the thresholds. Keep both rules strict: a false positive would change a score. `--no-loop-detection` turns them off.
+- **One mistake must not void a whole task.** The first tests need one feature each (sort without constraints, constants without references), and outputs carry no header that a single omission would break in every test. Keep new tasks that way.
 - **SQL scripts run statement by statement** (`run_script`), like the `sqlite3` shell: a statement that fails is skipped and the rest still runs, so one invalid trigger does not void the tables next to it. A `fail` step that fails with `no such table/column` does not count as a rule being enforced.
 - **Failed requests are not answers.** A request error, or a stream that ends without a finish reason (server stopped), is stored with an error and score 0; `--resume` asks those again (`request_failed`).
 - **A missing code fence must not cost points**: a person reading the answer would not be stopped by it. `extract_code` parses fences line by line (a fence starts a line; an inline ``` does not count; CRLF is normalized). A block left open runs to the end. A lone closing fence after code without its opening fence (an odd fence, possibly followed by prose or another block) makes the text before it a block, minus introductory prose lines, when it reads more like code than what the fence would open (`_code_likeness`). `selftest_extraction` covers these cases; replay the stored answers through old and new `extract_code` before changing it.
@@ -110,6 +107,8 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 3. Register with `task(...)`; keep the categories balanced across languages.
 4. Run `--selftest --only <id>`, check the original's score, and inspect per-test results for the `given` program to confirm each bug or tier behaves as designed.
 5. For timed tiers, measure the reference, a typical "good enough" solution, and the slow original with `--time-scale 5`.
+6. Avoid well-known puzzle problems (models know them by heart). If most answers to a write task would not compile, give the scaffolding and ask only for the core.
+7. After real runs, a task where every model scores 0 or 100 adds no discrimination: make it easier or harder, or replace it.
 
 **Changing tasks, tests, prompts or weights changes what a score means.** Bump `VERSION` whenever you do. The version is stored in `results.json` (`meta.version`) and shown in `report.md`; `--compare` lists it per model and warns when versions differ, and `--resume` refuses a run created by another version.
 
@@ -121,11 +120,8 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 
 `results/<model>/<timestamp>/` holds `results.json` (meta + per task-run records), `report.md`, and `answers/<task>_run<k>.md|.<ext>` (prompt, reasoning, answer, extracted code). `--compare` and `--resume` read `results.json`; keep it backward compatible or bump `VERSION`.
 
-## Known gaps
+## Known limitations
 
-- Difficulty is only **roughly calibrated**: against 13 models (Beta 13-17, 5 runs each) and 4 models on the first Beta 18-20 tasks. Those still gave `py_opt_subsum` 100 and `cs_write_sheet` 0 to almost every run: the 2D "sum = k" count is LeetCode 1074, which every model knows, and 77% of the finished C# spreadsheets did not compile (each model invents its own classes and records), half of the rest broke in the hand-written tokenizer. The corrected Beta 20 asks for "sum <= k" (sorted prefix sums per pair of rows: original 33%, 2D prefix sums 50%, no transposition 75%, sorted list, Fenwick or merge sort 100%) and turns `cs_write_sheet` into completing a given program (I/O, tokenizer, sort and output given; the model writes `Value`: without memoization 93%, without cycle detection or propagation 67%). Neither has been run against a model yet. After real runs, look for tasks where every model scores 0 or 100: they add no discrimination and should be made easier, harder, or replaced.
-- `py_opt_subsum` tiers 2 and 3 are the same idea in both orientations: a solution that always pairs rows (or always columns) passes one and times out on the other (about 15 s against 3.3 s).
-- The reference functions and solutions of `cpp_write_orderbook` and `java_write_rational` still implement features removed from the specs (CANCEL, powers). The tests never use them.
 - Single-shot only: no repair round after a compile error.
 - Model-written code runs with the user's privileges (temporary directory, time and memory limits, no sandbox).
 - `--resume` trusts the current command-line options instead of the stored ones.
@@ -134,4 +130,4 @@ Program tasks are stdin/stdout programs. Expected outputs are computed at run ti
 
 The benchmark `codebench.py` is in Beta. The user will provide some results to the agent so that it can improve the test.
 
-The first version is `1.0 Beta 1`. Whenever the agent changes the script, it should increment the Beta number by 1, without changing the value "1.0". It is not necessary to notify the user about the increments.
+The first version is `1.0 Beta 1`. Whenever the agent changes the script, it should increment the Beta number by 1, without changing the value "1.0". It is not necessary to notify the user about the increments. Exception: a change that corrects or completes the current, still-unpublished Beta keeps its number (and `COMPAT`/`MIGRATE_FROM`) and, once the user authorizes it, is squashed into that Beta's commit.
